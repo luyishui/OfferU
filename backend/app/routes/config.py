@@ -109,6 +109,14 @@ def _save_config(cfg: ConfigUpdate) -> None:
 # 启动时加载
 _current_config = _load_config()
 
+# 同步 config.json 的 LLM 配置到全局 Settings（确保启动后即可用）
+_startup_settings = get_settings()
+_startup_settings.llm_provider = _current_config.llm_provider
+_startup_settings.llm_model = _current_config.llm_model
+_startup_settings.deepseek_api_key = _current_config.deepseek_api_key
+_startup_settings.openai_api_key = _current_config.openai_api_key
+_startup_settings.ollama_base_url = _current_config.ollama_base_url
+
 
 def _mask_key(key: str) -> str:
     """对 API Key 进行脱敏，只显示前 4 位和后 4 位"""
