@@ -377,6 +377,77 @@ export function useResumeTemplates() {
   return useSWR<ResumeTemplate[]>(`${API_BASE}/api/resume/templates`, fetcher);
 }
 
+// ---- AI Skill Pipeline 深度分析 ----
+
+/** JD 分析结果（Skill 1 输出） */
+export interface JdAnalysis {
+  job_title: string;
+  company: string;
+  is_campus: boolean;
+  required_skills: string[];
+  preferred_skills: string[];
+  responsibilities: string[];
+  experience_level: string;
+  industry_tags: string[];
+  culture_keywords: string[];
+}
+
+/** 段落评分明细 */
+export interface SectionScore {
+  section: string;
+  score: number;
+  feedback: string;
+}
+
+/** 匹配分析结果（Skill 2 输出） */
+export interface MatchAnalysis {
+  ats_score: number;
+  matched_skills: string[];
+  missing_skills: string[];
+  section_scores: SectionScore[];
+  risk_items: string[];
+  summary: string;
+}
+
+/** Pipeline 聚合结果 */
+export interface SkillAnalyzeResult {
+  jd_analysis: JdAnalysis;
+  match_analysis: MatchAnalysis;
+}
+
+/** Skill Pipeline 深度分析（基于已有简历 ID） */
+export async function aiAnalyzeResume(
+  resumeId: number,
+  data: { jd_text?: string; job_id?: number }
+): Promise<SkillAnalyzeResult> {
+  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/ai/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `AI 分析失败 (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Skill Pipeline 深度分析（纯文本粘贴） */
+export async function aiAnalyzeText(
+  data: { resume_text: string; jd_text: string }
+): Promise<SkillAnalyzeResult> {
+  const res = await fetch(`${API_BASE}/api/resume/ai/analyze-text`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `AI 分析失败 (${res.status})`);
+  }
+  return res.json();
+}
+
 // ---- 投递管理 ----
 
 export interface ApplicationItem {

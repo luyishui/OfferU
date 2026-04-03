@@ -791,6 +791,137 @@ async def ai_optimize_text(data: AiOptimizeTextRequest):
     return ai_result
 
 
+# =============================================
+# AI Skill Pipeline — 模块化分步分析
+# =============================================
+# 新一代分析端点，使用 Skill Pipeline 架构：
+#   Skill 1: JD 解析 → Skill 2: 匹配分析
+# 相比旧的单次 optimize，更精准、更可控
+# =============================================
+
+
+class SkillAnalyzeRequest(BaseModel):
+    """Skill Pipeline 分析请求体"""
+    jd_text: Optional[str] = None
+    job_id: Optional[int] = None
+
+
+@router.post("/{resume_id}/ai/analyze")
+async def ai_analyze_resume(
+    resume_id: int,
+    data: SkillAnalyzeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    AI 深度分析 — Skill Pipeline 模块化架构
+    ─────────────────────────────────────────────
+    执行 JD 解析 + 简历匹配 分步分析:
+      1. Skill 1 (JD Analyzer): 提取岗位要求结构化信息
+      2. Skill 2 (Resume Matcher): ATS 评分 + 逐段匹配 + 风险检测
+
+    响应:
+      {
+        "jd_analysis": { job_title, required_skills, is_campus, ... },
+        "match_analysis": { ats_score, matched_skills, missing_skills, section_scores, risk_items, ... }
+      }
+    """
+    from app.agents.skills import SkillPipeline
+
+    # ── 1. 获取简历数据 ──
+    resume = await _get_resume_or_404(resume_id, db, load_sections=True)
+
+    # ── 2. 获取 JD 文本 ──
+    jd_text = ""
+    if data.jd_text:
+        jd_text = data.jd_text.strip()
+    elif data.job_id:
+        result = await db.execute(select(Job).where(Job.id == data.job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        jd_text = job.raw_description or ""
+
+    if not jd_text:
+        raise HTTPException(
+            status_code=400,
+            detail="请提供 JD 文本（jd_text）或选择岗位（job_id）",
+        )
+
+    # ── 3. 构建简历文本 ──
+    resume_data = _serialize_resume_full(resume)
+    resume_text = _flatten_resume_to_text(resume_data)
+
+    # ── 4. 执行 Skill Pipeline ──
+    pipeline = SkillPipeline()
+    result = await pipeline.run(
+        resume_text=resume_text,
+        resume_data=resume_data,
+        jd_text=jd_text,
+    )
+
+    # 检查是否有致命错误
+    for key, val in result.items():
+        if isinstance(val, dict) and "error" in val:
+            if val["error"] == "LLM 调用失败":
+                raise HTTPException(
+                    status_code=500,
+                    detail="AI 分析失败，请检查 LLM API Key 配置",
+                )
+
+    return result
+
+
+@router.post("/ai/analyze-text")
+async def ai_analyze_text(data: AiOptimizeTextRequest):
+    """
+    粘贴文本快速分析 — 无需预先创建简历
+    ─────────────────────────────────────────────
+    与 /ai/optimize-text 类似，但使用 Skill Pipeline 架构
+    返回更精细的分步分析结果。
+    """
+    from app.agents.skills import SkillPipeline
+
+    if not data.resume_text.strip() or not data.jd_text.strip():
+        raise HTTPException(status_code=400, detail="简历和 JD 文本不能为空")
+
+    pipeline = SkillPipeline()
+    result = await pipeline.run(
+        resume_text=data.resume_text.strip(),
+        resume_data=None,
+        jd_text=data.jd_text.strip(),
+    )
+
+    return result
+
+
+def _flatten_resume_to_text(resume_data: dict) -> str:
+    """将结构化简历 JSON 展平为可读纯文本（供 LLM 输入）"""
+    parts = []
+    if resume_data.get("user_name"):
+        parts.append(f"姓名: {resume_data['user_name']}")
+    if resume_data.get("summary"):
+        parts.append(f"个人简介: {resume_data['summary']}")
+
+    for section in resume_data.get("sections", []):
+        title = section.get("title", section.get("section_type", ""))
+        parts.append(f"\n## {title}")
+        for item in section.get("content_json", []):
+            if isinstance(item, dict):
+                label = item.get("title", item.get("company", item.get("school", "")))
+                if label:
+                    parts.append(f"### {label}")
+                desc = item.get("description", "")
+                if desc:
+                    parts.append(desc)
+                items = item.get("items", [])
+                if items:
+                    parts.append(", ".join(items) if isinstance(items, list) else str(items))
+            elif isinstance(item, str):
+                parts.append(item)
+
+    return "\n".join(parts)
+
+
 @router.post("/{resume_id}/ai/apply")
 async def ai_apply_suggestion(
     resume_id: int,
