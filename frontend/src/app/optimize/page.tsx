@@ -14,8 +14,12 @@ import {
 } from "@nextui-org/react";
 import {
   Sparkles, FileText, Briefcase, Check, AlertTriangle, ArrowRight, Upload,
+  Target, BarChart3, ShieldAlert,
 } from "lucide-react";
-import { useResumes, aiOptimizeResume, aiOptimizeText, parseResumeFile, AiOptimizeResult } from "@/lib/hooks";
+import {
+  useResumes, aiOptimizeResume, aiOptimizeText, parseResumeFile, AiOptimizeResult,
+  aiAnalyzeResume, aiAnalyzeText, SkillAnalyzeResult,
+} from "@/lib/hooks";
 
 export default function OptimizePage() {
   // 模式切换：select（选择已有简历） / paste（粘贴文本）
@@ -25,9 +29,12 @@ export default function OptimizePage() {
   const [resumeText, setResumeText] = useState("");
   const [jdText, setJdText] = useState("");
   const [result, setResult] = useState<AiOptimizeResult | null>(null);
+  const [analyzeResult, setAnalyzeResult] = useState<SkillAnalyzeResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [parsing, setParsing] = useState(false);
+  // 分析模式：optimize = 旧的优化建议，analyze = 新 Skill Pipeline 深度分析
+  const [analysisMode, setAnalysisMode] = useState<string>("analyze");
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -54,17 +61,33 @@ export default function OptimizePage() {
     setLoading(true);
     setError("");
     setResult(null);
+    setAnalyzeResult(null);
     try {
-      let res: AiOptimizeResult;
-      if (mode === "select" && selectedResumeId) {
-        res = await aiOptimizeResume(selectedResumeId, { jd_text: jdText.trim() });
+      if (analysisMode === "analyze") {
+        // Skill Pipeline 深度分析
+        let res: SkillAnalyzeResult;
+        if (mode === "select" && selectedResumeId) {
+          res = await aiAnalyzeResume(selectedResumeId, { jd_text: jdText.trim() });
+        } else {
+          res = await aiAnalyzeText({
+            resume_text: resumeText.trim(),
+            jd_text: jdText.trim(),
+          });
+        }
+        setAnalyzeResult(res);
       } else {
-        res = await aiOptimizeText({
-          resume_text: resumeText.trim(),
-          jd_text: jdText.trim(),
-        });
+        // 旧版优化建议
+        let res: AiOptimizeResult;
+        if (mode === "select" && selectedResumeId) {
+          res = await aiOptimizeResume(selectedResumeId, { jd_text: jdText.trim() });
+        } else {
+          res = await aiOptimizeText({
+            resume_text: resumeText.trim(),
+            jd_text: jdText.trim(),
+          });
+        }
+        setResult(res);
       }
-      setResult(res);
     } catch (err: any) {
       setError(err.message || "分析失败");
     } finally {
@@ -83,9 +106,9 @@ export default function OptimizePage() {
     >
       {/* 页面标题 */}
       <div>
-        <h1 className="text-3xl font-bold">AI 简历优化</h1>
+        <h1 className="text-3xl font-bold">AI 简历分析</h1>
         <p className="text-white/40 text-sm mt-1">
-          选择已有简历 + 粘贴目标 JD，AI 即刻分析关键词匹配度并生成优化建议
+          选择已有简历 + 粘贴目标 JD → 深度分析（JD 解析 + ATS 评分 + 匹配度）或生成优化建议
         </p>
       </div>
 
@@ -219,19 +242,55 @@ export default function OptimizePage() {
         </Card>
       </div>
 
-      {/* 分析按钮 */}
-      <div className="flex justify-center">
+      {/* 分析模式选择 + 按钮 */}
+      <div className="flex flex-col items-center gap-3">
+        <Tabs
+          size="sm"
+          variant="light"
+          color="secondary"
+          selectedKey={analysisMode}
+          onSelectionChange={(key) => setAnalysisMode(key as string)}
+          classNames={{
+            tabList: "gap-0 bg-white/5 rounded-lg p-0.5",
+            tab: "px-4 py-1.5 text-xs",
+            cursor: "bg-white/10",
+          }}
+        >
+          <Tab
+            key="analyze"
+            title={
+              <div className="flex items-center gap-1.5">
+                <Target size={13} />
+                <span>深度分析</span>
+              </div>
+            }
+          />
+          <Tab
+            key="optimize"
+            title={
+              <div className="flex items-center gap-1.5">
+                <Sparkles size={13} />
+                <span>优化建议</span>
+              </div>
+            }
+          />
+        </Tabs>
         <Button
           color="secondary"
           size="lg"
-          startContent={<Sparkles size={18} />}
+          startContent={analysisMode === "analyze" ? <Target size={18} /> : <Sparkles size={18} />}
           isLoading={loading}
           isDisabled={!canSubmit}
           onPress={handleOptimize}
           className="px-8"
         >
-          开始 AI 分析
+          {analysisMode === "analyze" ? "开始深度分析" : "开始 AI 优化"}
         </Button>
+        <p className="text-[10px] text-white/25">
+          {analysisMode === "analyze"
+            ? "Skill Pipeline: JD 解析 → ATS 评分 → 逐段匹配 → 风险检测"
+            : "单次 AI 优化: 关键词匹配 + 逐条优化建议"}
+        </p>
       </div>
 
       {/* 错误提示 */}
@@ -245,7 +304,230 @@ export default function OptimizePage() {
         </div>
       )}
 
-      {/* 分析结果 */}
+      {/* ===== Pipeline 深度分析结果 ===== */}
+      <AnimatePresence>
+        {analyzeResult && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-4"
+          >
+            <Divider className="border-white/[0.06]" />
+
+            {/* 顶部: ATS 评分 + JD 基本信息 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* ATS 总分 */}
+              {analyzeResult.match_analysis && (
+                <Card className="bg-white/[0.02] border border-white/[0.06]">
+                  <CardBody className="p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <BarChart3 size={14} className="text-purple-400" />
+                      <h4 className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+                        ATS 综合评分
+                      </h4>
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <div className={`text-5xl font-bold ${
+                        analyzeResult.match_analysis.ats_score >= 70 ? "text-emerald-400"
+                        : analyzeResult.match_analysis.ats_score >= 40 ? "text-amber-400"
+                        : "text-red-400"
+                      }`}>
+                        {analyzeResult.match_analysis.ats_score}
+                      </div>
+                      <span className="text-sm text-white/40 mb-2">/ 100</span>
+                    </div>
+                    <Progress
+                      value={analyzeResult.match_analysis.ats_score}
+                      maxValue={100}
+                      color={
+                        analyzeResult.match_analysis.ats_score >= 70 ? "success"
+                        : analyzeResult.match_analysis.ats_score >= 40 ? "warning"
+                        : "danger"
+                      }
+                      size="sm"
+                    />
+                    {analyzeResult.match_analysis.summary && (
+                      <p className="text-xs text-white/50 leading-relaxed mt-1">
+                        {analyzeResult.match_analysis.summary}
+                      </p>
+                    )}
+                  </CardBody>
+                </Card>
+              )}
+
+              {/* JD 信息卡 */}
+              {analyzeResult.jd_analysis && (
+                <Card className="bg-white/[0.02] border border-white/[0.06] md:col-span-2">
+                  <CardBody className="p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Target size={14} className="text-blue-400" />
+                      <h4 className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+                        JD 解析
+                      </h4>
+                      {analyzeResult.jd_analysis.is_campus && (
+                        <Chip size="sm" variant="flat" className="bg-blue-500/10 text-blue-300 text-[10px] h-5">
+                          校招岗位
+                        </Chip>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-3">
+                      <span className="text-lg font-semibold text-white/80">
+                        {analyzeResult.jd_analysis.job_title || "未识别"}
+                      </span>
+                      {analyzeResult.jd_analysis.company && (
+                        <span className="text-sm text-white/40">
+                          @ {analyzeResult.jd_analysis.company}
+                        </span>
+                      )}
+                      {analyzeResult.jd_analysis.experience_level && (
+                        <Chip size="sm" variant="flat" className="bg-white/5 text-white/40 text-[10px] h-5">
+                          {analyzeResult.jd_analysis.experience_level}
+                        </Chip>
+                      )}
+                    </div>
+                    {analyzeResult.jd_analysis.required_skills?.length > 0 && (
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-white/40 uppercase font-semibold">必须技能</span>
+                        <div className="flex flex-wrap gap-1">
+                          {analyzeResult.jd_analysis.required_skills.map((s, i) => (
+                            <Chip key={i} size="sm" variant="flat" className="bg-red-500/10 text-red-300 text-[10px] h-5">
+                              {s}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {analyzeResult.jd_analysis.preferred_skills?.length > 0 && (
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-white/40 uppercase font-semibold">加分技能</span>
+                        <div className="flex flex-wrap gap-1">
+                          {analyzeResult.jd_analysis.preferred_skills.map((s, i) => (
+                            <Chip key={i} size="sm" variant="flat" className="bg-yellow-500/10 text-yellow-300 text-[10px] h-5">
+                              {s}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </CardBody>
+                </Card>
+              )}
+            </div>
+
+            {/* 中部: 技能匹配对比 */}
+            {analyzeResult.match_analysis && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* 已匹配技能 */}
+                {analyzeResult.match_analysis.matched_skills?.length > 0 && (
+                  <Card className="bg-white/[0.02] border border-white/[0.06]">
+                    <CardBody className="p-4 space-y-2">
+                      <h4 className="text-xs font-semibold text-emerald-400/60 uppercase tracking-wider">
+                        ✓ 已匹配 ({analyzeResult.match_analysis.matched_skills.length})
+                      </h4>
+                      <div className="flex flex-wrap gap-1.5">
+                        {analyzeResult.match_analysis.matched_skills.map((s, i) => (
+                          <Chip key={i} size="sm" variant="flat" className="bg-emerald-500/10 text-emerald-300 text-[10px] h-5">
+                            {s}
+                          </Chip>
+                        ))}
+                      </div>
+                    </CardBody>
+                  </Card>
+                )}
+
+                {/* 缺失技能 */}
+                {analyzeResult.match_analysis.missing_skills?.length > 0 && (
+                  <Card className="bg-white/[0.02] border border-white/[0.06]">
+                    <CardBody className="p-4 space-y-2">
+                      <h4 className="text-xs font-semibold text-orange-400/60 uppercase tracking-wider">
+                        ✗ 缺失 ({analyzeResult.match_analysis.missing_skills.length})
+                      </h4>
+                      <div className="flex flex-wrap gap-1.5">
+                        {analyzeResult.match_analysis.missing_skills.map((s, i) => (
+                          <Chip key={i} size="sm" variant="flat" className="bg-orange-500/10 text-orange-300 text-[10px] h-5">
+                            {s}
+                          </Chip>
+                        ))}
+                      </div>
+                    </CardBody>
+                  </Card>
+                )}
+              </div>
+            )}
+
+            {/* 下部: 逐段评分 + 风险项 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* 逐段评分 */}
+              {analyzeResult.match_analysis?.section_scores?.length > 0 && (
+                <Card className="bg-white/[0.02] border border-white/[0.06] md:col-span-2">
+                  <CardBody className="p-4 space-y-3">
+                    <h4 className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+                      逐段评分
+                    </h4>
+                    <div className="space-y-3">
+                      {analyzeResult.match_analysis.section_scores.map((sec, i) => (
+                        <div key={i} className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-white/60 font-medium">{sec.section}</span>
+                            <span className={`text-xs font-bold ${
+                              sec.score >= 70 ? "text-emerald-400"
+                              : sec.score >= 40 ? "text-amber-400"
+                              : "text-red-400"
+                            }`}>
+                              {sec.score}
+                            </span>
+                          </div>
+                          <Progress
+                            value={sec.score}
+                            maxValue={100}
+                            size="sm"
+                            color={sec.score >= 70 ? "success" : sec.score >= 40 ? "warning" : "danger"}
+                          />
+                          {sec.feedback && (
+                            <p className="text-[11px] text-white/35">{sec.feedback}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </CardBody>
+                </Card>
+              )}
+
+              {/* 风险项 */}
+              {analyzeResult.match_analysis?.risk_items?.length > 0 && (
+                <Card className="bg-white/[0.02] border border-red-500/10">
+                  <CardBody className="p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert size={14} className="text-red-400" />
+                      <h4 className="text-xs font-semibold text-red-400/60 uppercase tracking-wider">
+                        风险项 ({analyzeResult.match_analysis.risk_items.length})
+                      </h4>
+                    </div>
+                    <div className="space-y-2">
+                      {analyzeResult.match_analysis.risk_items.map((risk, i) => (
+                        <div key={i} className="flex items-start gap-2 text-xs text-red-300/70">
+                          <AlertTriangle size={12} className="mt-0.5 flex-shrink-0 text-red-400/50" />
+                          <span>{
+                            risk === "no_contact" ? "未提供联系方式" :
+                            risk === "no_gpa" ? "未填写 GPA / 学业成绩" :
+                            risk === "too_long" ? "简历篇幅过长" :
+                            risk === "no_quantified" ? "缺少量化数据支撑" :
+                            risk === "vague_description" ? "描述过于笼统模糊" :
+                            risk
+                          }</span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardBody>
+                </Card>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ===== 旧版优化建议结果 ===== */}
       <AnimatePresence>
         {result && (
           <motion.div
