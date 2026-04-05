@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
-from app.routes import jobs, resume, calendar, email, config, applications
+from app.routes import jobs, resume, calendar, email, config, applications, scraper
 
 settings = get_settings()
 
@@ -51,6 +51,7 @@ app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(email.router, prefix="/api/email", tags=["Email"])
 app.include_router(config.router, prefix="/api/config", tags=["Config"])
 app.include_router(applications.router, prefix="/api/applications", tags=["Applications"])
+app.include_router(scraper.router, prefix="/api/scraper", tags=["Scraper"])
 
 # ---- 静态文件（头像等上传文件） ----
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")

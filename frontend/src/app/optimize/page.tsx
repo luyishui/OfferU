@@ -10,20 +10,27 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Card, CardBody, Button, Textarea, Chip, Progress, Divider, Tabs, Tab,
+  Card, CardBody, Button, Textarea, Chip, Progress, Divider, Tabs, Tab, Input,
 } from "@nextui-org/react";
 import {
   Sparkles, FileText, Briefcase, Check, AlertTriangle, ArrowRight, Upload,
-  Target, BarChart3, ShieldAlert, PenLine, ArrowUpDown, ChevronDown, ChevronUp,
+  Target, BarChart3, ShieldAlert, PenLine, ArrowUpDown, ChevronDown, ChevronUp, Search,
 } from "lucide-react";
 import {
   useResumes, aiOptimizeResume, aiOptimizeText, parseResumeFile, AiOptimizeResult,
   aiAnalyzeResume, aiAnalyzeText, SkillAnalyzeResult, RewriteSuggestion, aiApplyBatch,
+  useJobs, Job,
 } from "@/lib/hooks";
 
 export default function OptimizePage() {
   // 模式切换：select（选择已有简历） / paste（粘贴文本）
   const [mode, setMode] = useState<string>("select");
+  // JD 来源：jobs（从岗位库选择） / paste（手动粘贴）
+  const [jdMode, setJdMode] = useState<string>("jobs");
+  const [jobSearchKeyword, setJobSearchKeyword] = useState("");
+  const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
+  const { data: jobsData } = useJobs({ keyword: jobSearchKeyword, page: 1 });
+  const jobList: Job[] = Array.isArray(jobsData?.items) ? jobsData.items : [];
   const { data: resumes } = useResumes();
   const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
   const [resumeText, setResumeText] = useState("");
@@ -230,24 +237,112 @@ export default function OptimizePage() {
         {/* 右侧：JD */}
         <Card className="bg-white/[0.02] border border-white/[0.06]">
           <CardBody className="p-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <Briefcase size={16} className="text-purple-400" />
-              <span className="text-sm font-semibold text-white/70">职位描述 (JD)</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Briefcase size={16} className="text-purple-400" />
+                <span className="text-sm font-semibold text-white/70">职位描述 (JD)</span>
+              </div>
+              <Tabs
+                size="sm"
+                variant="light"
+                selectedKey={jdMode}
+                onSelectionChange={(key) => setJdMode(key as string)}
+                classNames={{
+                  tabList: "gap-0 bg-white/5 rounded-lg p-0.5",
+                  tab: "px-3 py-1 text-xs",
+                  cursor: "bg-white/10",
+                }}
+              >
+                <Tab key="jobs" title="从岗位库" />
+                <Tab key="paste" title="手动粘贴" />
+              </Tabs>
             </div>
-            <Textarea
-              variant="bordered"
-              placeholder="粘贴目标岗位的完整职位描述..."
-              minRows={12}
-              maxRows={20}
-              value={jdText}
-              onValueChange={setJdText}
-              classNames={{
-                inputWrapper: "bg-white/[0.02] border-white/[0.06]",
-              }}
-            />
-            <p className="text-[11px] text-white/25">
-              包含完整的岗位要求、技能需求、职责描述效果更好
-            </p>
+
+            {jdMode === "jobs" ? (
+              <div className="space-y-2">
+                <Input
+                  size="sm"
+                  variant="bordered"
+                  placeholder="搜索岗位（标题 / 公司）"
+                  value={jobSearchKeyword}
+                  onValueChange={setJobSearchKeyword}
+                  startContent={<Search size={14} className="text-white/30" />}
+                  classNames={{
+                    inputWrapper: "bg-white/[0.02] border-white/[0.06] h-9",
+                  }}
+                />
+                <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                  {jobList.length === 0 ? (
+                    <div className="text-center py-8 text-white/30 text-sm">
+                      {jobSearchKeyword ? "未找到匹配岗位" : "暂无岗位数据，请先在「爬虫」页面采集"}
+                    </div>
+                  ) : (
+                    jobList.map((job) => (
+                      <button
+                        key={job.id}
+                        onClick={() => {
+                          setSelectedJobId(job.id);
+                          setJdText(job.raw_description || "");
+                        }}
+                        className={`w-full text-left p-3 rounded-lg border transition-all ${
+                          selectedJobId === job.id
+                            ? "border-purple-500 bg-purple-500/10"
+                            : "border-white/[0.06] bg-white/[0.02] hover:border-white/15"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium text-white/80 truncate">
+                            {job.title}
+                          </span>
+                          {selectedJobId === job.id && (
+                            <Check size={14} className="text-purple-400 flex-shrink-0" />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[11px] text-white/40">{job.company}</span>
+                          {job.salary_text && (
+                            <span className="text-[11px] text-emerald-400/70">{job.salary_text}</span>
+                          )}
+                          {job.location && (
+                            <span className="text-[10px] text-white/25">{job.location}</span>
+                          )}
+                        </div>
+                        {job.is_campus && (
+                          <Chip size="sm" variant="flat" className="bg-blue-500/10 text-blue-300 text-[9px] h-4 mt-1">
+                            校招
+                          </Chip>
+                        )}
+                      </button>
+                    ))
+                  )}
+                </div>
+                {selectedJobId && jdText && (
+                  <p className="text-[11px] text-purple-400/60">
+                    已选择岗位 JD，共 {jdText.length} 字
+                  </p>
+                )}
+              </div>
+            ) : (
+              <>
+                <Textarea
+                  variant="bordered"
+                  placeholder="粘贴目标岗位的完整职位描述..."
+                  minRows={12}
+                  maxRows={20}
+                  value={jdText}
+                  onValueChange={(val) => {
+                    setJdText(val);
+                    setSelectedJobId(null);
+                  }}
+                  classNames={{
+                    inputWrapper: "bg-white/[0.02] border-white/[0.06]",
+                  }}
+                />
+                <p className="text-[11px] text-white/25">
+                  包含完整的岗位要求、技能需求、职责描述效果更好
+                </p>
+              </>
+            )}
           </CardBody>
         </Card>
       </div>

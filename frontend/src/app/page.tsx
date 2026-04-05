@@ -33,7 +33,7 @@ const item = {
 export default function DashboardPage() {
   const [period, setPeriod] = useState<string>("week");
   const { data: stats } = useJobStats(period);
-  const { data: jobsData } = useJobs(1, period);
+  const { data: jobsData } = useJobs({ page: 1, period });
   const { data: trendData } = useJobTrend(period);
 
   const totalJobs = stats?.total_jobs ?? 0;

@@ -28,10 +28,22 @@ export interface Job {
   company: string;
   location: string;
   url: string;
+  apply_url: string;
   source: string;
+  raw_description: string;
   posted_at: string | null;
   summary: string;
   keywords: string[];
+  salary_min: number | null;
+  salary_max: number | null;
+  salary_text: string;
+  education: string;
+  experience: string;
+  job_type: string;
+  company_size: string;
+  company_industry: string;
+  company_logo: string;
+  is_campus: boolean;
   created_at: string;
 }
 
@@ -79,12 +91,25 @@ export interface Notification {
  * @param period 时间范围: today / week / month
  * @param source 数据源筛选
  */
-export function useJobs(page = 1, period = "week", source?: string) {
-  const params = new URLSearchParams({
-    page: String(page),
-    period,
-    ...(source ? { source } : {}),
-  });
+export interface JobFilters {
+  page?: number;
+  period?: string;
+  source?: string;
+  keyword?: string;
+  job_type?: string;
+  education?: string;
+  is_campus?: boolean;
+}
+
+export function useJobs(filters: JobFilters = {}) {
+  const params = new URLSearchParams();
+  params.set("page", String(filters.page ?? 1));
+  if (filters.period) params.set("period", filters.period);
+  if (filters.source) params.set("source", filters.source);
+  if (filters.keyword) params.set("keyword", filters.keyword);
+  if (filters.job_type) params.set("job_type", filters.job_type);
+  if (filters.education) params.set("education", filters.education);
+  if (filters.is_campus !== undefined) params.set("is_campus", String(filters.is_campus));
   return useSWR<JobsListResponse>(
     `${API_BASE}/api/jobs/?${params}`,
     fetcher
@@ -576,5 +601,79 @@ export async function applyTemplate(resumeId: number, templateId: number) {
     method: "POST",
   });
   if (!res.ok) throw new Error(`Apply template failed: ${res.status}`);
+  return res.json();
+}
+
+// ---- 爬虫管理 ----
+
+export interface ScraperSource {
+  key: string;
+  name: string;
+  status: string;  // "ready" | "skeleton" | "planned"
+  description: string;
+  registered: boolean;
+}
+
+export interface ScraperTask {
+  id: string;
+  source: string;
+  keywords: string[];
+  location: string;
+  status: string;  // "running" | "completed" | "failed"
+  created_at: string;
+  result: { created?: number; skipped?: number; total?: number; error?: string; warning?: string } | null;
+}
+
+/** 获取所有数据源状态 */
+export function useScraperSources() {
+  return useSWR<ScraperSource[]>(`${API_BASE}/api/scraper/sources`, fetcher);
+}
+
+/** 获取爬取任务列表 */
+export function useScraperTasks() {
+  return useSWR<ScraperTask[]>(`${API_BASE}/api/scraper/tasks`, fetcher, {
+    refreshInterval: 3000,  // 运行中自动刷新
+  });
+}
+
+/** 触发爬取任务 */
+export async function runScraper(source: string, keywords: string[], location = "", maxResults = 50) {
+  const res = await fetch(`${API_BASE}/api/scraper/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source, keywords, location, max_results: maxResults }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "启动爬取失败");
+  }
+  return res.json();
+}
+
+// ---- BOSS直聘 Cookie 管理 ----
+
+export interface BossStatus {
+  configured: boolean;
+  has_wt2: boolean;
+  has_zp_token: boolean;
+  message: string;
+}
+
+/** 获取 BOSS直聘 Cookie 配置状态 */
+export function useBossStatus() {
+  return useSWR<BossStatus>(`${API_BASE}/api/config/boss-status`, fetcher);
+}
+
+/** 保存 BOSS Cookie 到后端配置（先读取当前配置再合并，避免覆盖其他字段） */
+export async function saveBossCookie(cookie: string) {
+  // 先拿当前完整配置
+  const current = await fetcher(`${API_BASE}/api/config/`);
+  // 合并 boss_cookie，其余字段原值回传
+  const res = await fetch(`${API_BASE}/api/config/`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...current, boss_cookie: cookie }),
+  });
+  if (!res.ok) throw new Error("保存 Cookie 失败");
   return res.json();
 }

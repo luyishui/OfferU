@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import Job
+from app.services.campus_detector import detect_campus
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -31,12 +32,24 @@ class JobPayload(BaseModel):
     company: str
     location: str = ""
     url: str = ""
+    apply_url: str = ""
     source: str = "linkedin"
     raw_description: str = ""
     posted_at: Optional[str] = None
     hash_key: str
     summary: str = ""
     keywords: list[str] = []
+    # ---- 新增校招字段 ----
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    salary_text: str = ""
+    education: str = ""
+    experience: str = ""
+    job_type: str = ""
+    company_size: str = ""
+    company_industry: str = ""
+    company_logo: str = ""
+    is_campus: bool = False
 
 
 class IngestRequest(BaseModel):
@@ -53,18 +66,43 @@ async def list_jobs(
     source: Optional[str] = None,
     period: Optional[str] = Query(None, description="today / week / month"),
     sort_by: str = Query("created_at", description="排序字段"),
+    keyword: Optional[str] = Query(None, description="标题/公司关键词搜索"),
+    job_type: Optional[str] = Query(None, description="岗位类型: 全职/实习/校招"),
+    education: Optional[str] = Query(None, description="学历要求: 本科/硕士/博士"),
+    is_campus: Optional[bool] = Query(None, description="仅校招岗位"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     获取岗位列表（分页 + 筛选 + 排序）
     - period: today=今日, week=本周, month=本月
     - sort_by: created_at / posted_at / title
+    - keyword: 模糊匹配标题或公司名
+    - job_type / education / is_campus: 精确筛选
     """
     query = select(Job)
 
     # 数据源筛选
     if source:
         query = query.where(Job.source == source)
+
+    # 关键词搜索（标题或公司名）
+    if keyword:
+        like_pattern = f"%{keyword}%"
+        query = query.where(
+            (Job.title.ilike(like_pattern)) | (Job.company.ilike(like_pattern))
+        )
+
+    # 岗位类型筛选
+    if job_type:
+        query = query.where(Job.job_type == job_type)
+
+    # 学历要求筛选
+    if education:
+        query = query.where(Job.education == education)
+
+    # 校招筛选
+    if is_campus is not None:
+        query = query.where(Job.is_campus == is_campus)
 
     # 时间范围筛选
     if period == "today":
@@ -237,11 +275,28 @@ async def ingest_jobs(req: IngestRequest, db: AsyncSession = Depends(get_db)):
             company=item.company,
             location=item.location,
             url=item.url,
+            apply_url=item.apply_url,
             source=item.source,
             raw_description=item.raw_description,
             hash_key=item.hash_key,
             summary=item.summary,
             keywords=item.keywords,
+            salary_min=item.salary_min,
+            salary_max=item.salary_max,
+            salary_text=item.salary_text,
+            education=item.education,
+            experience=item.experience,
+            job_type=item.job_type,
+            company_size=item.company_size,
+            company_industry=item.company_industry,
+            company_logo=item.company_logo,
+            is_campus=item.is_campus or detect_campus(
+                title=item.title,
+                source=item.source,
+                experience=item.experience,
+                job_type=item.job_type,
+                raw_description=item.raw_description,
+            ),
         )
         db.add(job)
         created += 1
@@ -258,9 +313,21 @@ def _job_to_dict(job: Job) -> dict:
         "company": job.company,
         "location": job.location,
         "url": job.url,
+        "apply_url": job.apply_url or "",
         "source": job.source,
+        "raw_description": job.raw_description or "",
         "posted_at": str(job.posted_at) if job.posted_at else None,
         "summary": job.summary,
         "keywords": job.keywords or [],
+        "salary_min": job.salary_min,
+        "salary_max": job.salary_max,
+        "salary_text": job.salary_text or "",
+        "education": job.education or "",
+        "experience": job.experience or "",
+        "job_type": job.job_type or "",
+        "company_size": job.company_size or "",
+        "company_industry": job.company_industry or "",
+        "company_logo": job.company_logo or "",
+        "is_campus": job.is_campus or False,
         "created_at": str(job.created_at),
     }

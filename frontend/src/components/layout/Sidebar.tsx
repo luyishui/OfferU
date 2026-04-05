@@ -25,6 +25,7 @@ import {
   BarChart3,
   Send,
   Sparkles,
+  Bug,
 } from "lucide-react";
 
 const navItems = [
@@ -33,6 +34,7 @@ const navItems = [
   { href: "/resume", label: "简历", icon: FileText },
   { href: "/optimize", label: "AI 优化", icon: Sparkles },
   { href: "/applications", label: "投递", icon: Send },
+  { href: "/scraper", label: "爬虫", icon: Bug },
   { href: "/calendar", label: "日程", icon: Calendar },
   { href: "/email", label: "邮件通知", icon: Mail },
   { href: "/analytics", label: "周报分析", icon: BarChart3 },

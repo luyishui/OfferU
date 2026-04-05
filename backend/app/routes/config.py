@@ -73,6 +73,10 @@ class ConfigUpdate(BaseModel):
     deepseek_api_key: str = ""
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
+    # BOSS直聘 Cookie（用户从浏览器粘贴，含 wt2/zp_token，有效期约 7-14 天）
+    boss_cookie: str = ""
+    # 智联招聘 Cookie（可选，用户从浏览器粘贴，提升 API 访问成功率）
+    zhilian_cookie: str = ""
 
 
 # ---- 持久化：加载 / 保存配置文件 ----
@@ -132,6 +136,12 @@ async def get_config():
     # API Key 脱敏，不直接暴露完整 Key
     data["deepseek_api_key"] = _mask_key(data["deepseek_api_key"])
     data["openai_api_key"] = _mask_key(data["openai_api_key"])
+    # BOSS Cookie 脱敏：只告知是否已配置，不暴露内容
+    data["boss_cookie_set"] = bool(data.get("boss_cookie", ""))
+    data["boss_cookie"] = "***已配置***" if data.get("boss_cookie") else ""
+    # 智联 Cookie 脱敏
+    data["zhilian_cookie_set"] = bool(data.get("zhilian_cookie", ""))
+    data["zhilian_cookie"] = "***已配置***" if data.get("zhilian_cookie") else ""
     data["available_providers"] = AVAILABLE_PROVIDERS
     return data
 
@@ -145,6 +155,12 @@ async def update_config(data: ConfigUpdate):
         data.deepseek_api_key = _current_config.deepseek_api_key
     if not data.openai_api_key or "*" in data.openai_api_key:
         data.openai_api_key = _current_config.openai_api_key
+    # BOSS Cookie：前端传 "***已配置***" 表示不修改，传空串表示清除
+    if data.boss_cookie == "***已配置***":
+        data.boss_cookie = _current_config.boss_cookie
+    # 智联 Cookie：同理
+    if data.zhilian_cookie == "***已配置***":
+        data.zhilian_cookie = _current_config.zhilian_cookie
     _current_config = data
     # 持久化到 config.json
     _save_config(_current_config)
@@ -156,3 +172,27 @@ async def update_config(data: ConfigUpdate):
     settings.openai_api_key = data.openai_api_key
     settings.ollama_base_url = data.ollama_base_url
     return {"message": "Config updated", "config": _current_config.model_dump()}
+
+
+@router.get("/boss-status")
+async def boss_cookie_status():
+    """
+    检查 BOSS直聘 Cookie 配置状态
+    返回：是否已配置、关键字段是否存在、上次验证结果
+    """
+    cookie = _current_config.boss_cookie
+    if not cookie:
+        return {
+            "configured": False,
+            "has_wt2": False,
+            "has_zp_token": False,
+            "message": "未配置 Cookie，请在浏览器登录 zhipin.com 后粘贴 Cookie",
+        }
+    return {
+        "configured": True,
+        "has_wt2": "wt2" in cookie,
+        "has_zp_token": "zp_token" in cookie,
+        "message": "Cookie 已配置" + (
+            "，关键字段完整" if "wt2" in cookie else "，但缺少 wt2 字段，可能无法正常使用"
+        ),
+    }

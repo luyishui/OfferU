@@ -206,7 +206,7 @@ export default function ResumeEditorPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const [appliedSuggestions, setAppliedSuggestions] = useState<Set<number>>(new Set());
-  const { data: jobsData } = useJobs(1, "month");
+  const { data: jobsData } = useJobs({ page: 1, period: "month" });
   const { data: templates } = useResumeTemplates();
 
   /** 应用模板 — 覆盖当前样式配置 */

@@ -11,19 +11,19 @@
 import { useState, useEffect, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Card, CardBody, Input, Textarea, Switch, Button, Divider, Select, SelectItem, Chip } from "@nextui-org/react";
-import { Save, Check, Sparkles, Cpu, Globe, Server, Eye, EyeOff, Key } from "lucide-react";
+import { Save, Check, Sparkles, Cpu, Globe, Server, Eye, EyeOff, Key, Cookie } from "lucide-react";
 import { useConfig, updateConfig } from "@/lib/hooks";
 
 const dataSources = [
-  { name: "linkedin", label: "LinkedIn", available: true },
   { name: "shixiseng", label: "实习僧", available: true },
+  { name: "boss", label: "BOSS直聘", available: true },
   { name: "zhilian", label: "智联招聘", available: true },
-  { name: "bytedance", label: "字节跳动", available: true },
-  { name: "alibaba", label: "阿里巴巴", available: true },
-  { name: "tencent", label: "腾讯", available: true },
-  { name: "boss", label: "BOSS直聘", available: false },
+  { name: "linkedin", label: "LinkedIn", available: true },
+  { name: "jobspy", label: "JobSpy 聚合", available: true },
+  { name: "bytedance", label: "字节跳动", available: false },
+  { name: "alibaba", label: "阿里巴巴", available: false },
+  { name: "tencent", label: "腾讯", available: false },
   { name: "maimai", label: "脉脉", available: false },
-  { name: "guopin", label: "国聘", available: false },
 ];
 
 /** Provider 图标映射 */
@@ -52,6 +52,10 @@ export default function SettingsPage() {
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState("http://localhost:11434");
   const [showDeepseekKey, setShowDeepseekKey] = useState(false);
   const [showOpenaiKey, setShowOpenaiKey] = useState(false);
+  const [bossCookie, setBossCookie] = useState("");
+  const [zhilianCookie, setZhilianCookie] = useState("");
+  const [showBossCookie, setShowBossCookie] = useState(false);
+  const [showZhilianCookie, setShowZhilianCookie] = useState(false);
 
   // 后端返回的多 Provider 列表
   const [availableProviders, setAvailableProviders] = useState<
@@ -72,6 +76,8 @@ export default function SettingsPage() {
       setDeepseekApiKey(config.deepseek_api_key || "");
       setOpenaiApiKey(config.openai_api_key || "");
       setOllamaBaseUrl(config.ollama_base_url || "http://localhost:11434");
+      setBossCookie(config.boss_cookie || "");
+      setZhilianCookie(config.zhilian_cookie || "");
       if (config.available_providers) {
         setAvailableProviders(config.available_providers);
       }
@@ -117,6 +123,8 @@ export default function SettingsPage() {
       deepseek_api_key: deepseekApiKey.trim(),
       openai_api_key: openaiApiKey.trim(),
       ollama_base_url: ollamaBaseUrl.trim(),
+      boss_cookie: bossCookie.trim(),
+      zhilian_cookie: zhilianCookie.trim(),
     });
     await mutate();
     setSaving(false);
@@ -334,6 +342,57 @@ export default function SettingsPage() {
             type="email"
             value={emailTo}
             onValueChange={setEmailTo}
+          />
+        </CardBody>
+      </Card>
+
+      {/* 爬虫 Cookie 配置 */}
+      <Card className="bg-white/5 border border-white/10">
+        <CardBody className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Cookie size={20} className="text-orange-400" />
+            <h3 className="text-lg font-semibold">爬虫认证配置</h3>
+          </div>
+          <p className="text-xs text-white/40">
+            部分招聘平台需要登录后的 Cookie 才能获取数据。在浏览器登录后，<br />
+            按 F12 → Network → 复制任意请求的 Cookie 字段粘贴到这里。Cookie 仅保存在本地。
+          </p>
+
+          <Input
+            label="BOSS直聘 Cookie"
+            variant="bordered"
+            placeholder="wt2=...; zp_token=...; ..."
+            description={bossCookie && bossCookie !== "***已配置***" && !bossCookie.includes("wt2") ? "Cookie 应包含 wt2 字段" : bossCookie === "***已配置***" ? "已配置，输入新值将覆盖" : undefined}
+            color={bossCookie && bossCookie !== "***已配置***" && !bossCookie.includes("wt2") ? "warning" : undefined}
+            value={bossCookie}
+            onValueChange={setBossCookie}
+            type={showBossCookie ? "text" : "password"}
+            endContent={
+              <button type="button" onClick={() => setShowBossCookie(!showBossCookie)} className="text-white/30 hover:text-white/60">
+                {showBossCookie ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            }
+            classNames={{
+              inputWrapper: "bg-white/[0.03] border-white/[0.08] hover:border-white/15",
+            }}
+          />
+
+          <Input
+            label="智联招聘 Cookie（可选）"
+            variant="bordered"
+            placeholder="登录 zhaopin.com 后复制 Cookie..."
+            description={zhilianCookie === "***已配置***" ? "已配置，输入新值将覆盖" : "无 Cookie 时会尝试匿名访问"}
+            value={zhilianCookie}
+            onValueChange={setZhilianCookie}
+            type={showZhilianCookie ? "text" : "password"}
+            endContent={
+              <button type="button" onClick={() => setShowZhilianCookie(!showZhilianCookie)} className="text-white/30 hover:text-white/60">
+                {showZhilianCookie ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            }
+            classNames={{
+              inputWrapper: "bg-white/[0.03] border-white/[0.08] hover:border-white/15",
+            }}
           />
         </CardBody>
       </Card>

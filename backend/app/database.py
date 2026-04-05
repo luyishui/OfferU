@@ -34,10 +34,39 @@ async def get_db():
 
 
 async def init_db():
-    """创建所有表（首次启动时调用）"""
+    """创建所有表（首次启动时调用）+ 自动补全缺失列"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 轻量级迁移：检查已有表并补全缺失列（仅 SQLite）
+        await conn.run_sync(_auto_migrate)
     await seed_templates()
+
+
+def _auto_migrate(connection):
+    """对比模型定义与实际表结构，用 ALTER TABLE ADD COLUMN 补全缺失列"""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(connection)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name not in existing_cols:
+                col_type = col.type.compile(connection.dialect)
+                default_clause = ""
+                if col.default is not None:
+                    val = col.default.arg
+                    if isinstance(val, str):
+                        default_clause = f" DEFAULT '{val}'"
+                    elif isinstance(val, bool):
+                        default_clause = f" DEFAULT {1 if val else 0}"
+                    elif isinstance(val, (int, float)):
+                        default_clause = f" DEFAULT {val}"
+                nullable = "" if col.nullable else " NOT NULL"
+                if nullable and not default_clause:
+                    default_clause = " DEFAULT ''" if "CHAR" in col_type or "TEXT" in col_type else " DEFAULT 0"
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}{nullable}{default_clause}'
+                connection.execute(text(ddl))
 
 
 # =============================================
