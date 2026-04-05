@@ -9,7 +9,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, ForeignKey, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -29,6 +29,18 @@ class Job(Base):
     source: Mapped[str] = mapped_column(String(50), index=True, default="linkedin")
     raw_description: Mapped[str] = mapped_column(Text, default="")
     posted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # ---- 岗位详情（校招场景关键字段） ----
+    salary_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 月薪下限（元）
+    salary_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 月薪上限（元）
+    salary_text: Mapped[str] = mapped_column(String(100), default="")  # 原始薪资文本，如 "15-25K·13薪"
+    education: Mapped[str] = mapped_column(String(50), default="")  # 学历要求，如 "本科" "硕士"
+    experience: Mapped[str] = mapped_column(String(100), default="")  # 经验要求，如 "1-3年" "应届"
+    job_type: Mapped[str] = mapped_column(String(50), default="")  # 岗位类型，如 "全职" "实习" "校招"
+    company_size: Mapped[str] = mapped_column(String(100), default="")  # 公司规模，如 "100-499人"
+    company_industry: Mapped[str] = mapped_column(String(200), default="")  # 行业，如 "游戏" "AI"
+    company_logo: Mapped[str] = mapped_column(Text, default="")  # 公司 Logo URL
+    is_campus: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否校招岗位
 
     # ---- AI 分析输出 ----
     summary: Mapped[str] = mapped_column(Text, default="")
