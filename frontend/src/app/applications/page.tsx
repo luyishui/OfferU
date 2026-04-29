@@ -173,11 +173,11 @@ function InlineCellEditor({
     onFirstEditHint();
   }, [onFirstEditHint]);
 
-  const commitAndClose = async () => {
+  const commitAndClose = async (nextDraft: unknown = draft) => {
     if (savingRef.current) return;
     savingRef.current = true;
     try {
-      await onCommit(draft);
+      await onCommit(nextDraft);
     } finally {
       onClose();
       savingRef.current = false;
@@ -234,7 +234,11 @@ function InlineCellEditor({
         selectedKeys={draft ? [String(draft)] : []}
         onSelectionChange={(keys) => {
           const first = Array.from(keys).at(0);
-          setDraft(first ? String(first) : "");
+          const nextDraft = first ? String(first) : "";
+          setDraft(nextDraft);
+          if (first) {
+            void commitAndClose(nextDraft);
+          }
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -242,7 +246,6 @@ function InlineCellEditor({
             void commitAndClose();
           }
         }}
-        onBlur={() => void commitAndClose()}
         classNames={{
           trigger: "rounded-none border border-[var(--border)] bg-white shadow-none h-10",
         }}

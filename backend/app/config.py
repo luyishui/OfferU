@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # ---- AI 模型配置 ----
     # llm_provider: openai / deepseek / qwen / siliconflow / gemini / zhipu / ollama / custom
     llm_provider: str = "deepseek"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
     active_llm_config_id: str = ""
     active_llm_base_url: str = ""
     active_llm_api_key: str = ""
@@ -45,10 +45,14 @@ class Settings(BaseSettings):
     # ---- 安全 ----
     secret_key: str = "change-me-in-production"
     cors_origins: str = (
+        "http://localhost:3011,"
+        "http://127.0.0.1:3011,"
         "http://localhost:3000,"
         "http://127.0.0.1:3000,"
         "http://localhost:3001,"
-        "http://127.0.0.1:3001"
+        "http://127.0.0.1:3001,"
+        "http://localhost:5140,"
+        "http://127.0.0.1:5140"
     )
 
     # ---- Gmail OAuth ----

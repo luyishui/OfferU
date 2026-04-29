@@ -15,9 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from app.config import get_settings
 from app.database import init_db
 try:
-    from app.mcp_server import mcp as mcp_server
+    from app.mcp_server import HAS_MCP_SERVER, mcp as mcp_server
     from app.routes import agent as agent_route
-    _HAS_MCP = True
+    _HAS_MCP = HAS_MCP_SERVER
 except ImportError:
     mcp_server = None
     agent_route = None

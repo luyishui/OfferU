@@ -62,9 +62,9 @@ TIER_MODEL_MAP: dict[str, dict[str, str]] = {
         "premium": "qwen3.5-plus",
     },
     "deepseek": {
-        "fast": "deepseek-chat",
-        "standard": "deepseek-chat",
-        "premium": "deepseek-reasoner",
+        "fast": "deepseek-v4-flash",
+        "standard": "deepseek-v4-flash",
+        "premium": "deepseek-v4-pro",
     },
     "openai": {
         "fast": "gpt-4o-mini",

@@ -69,8 +69,10 @@ const FALLBACK_PROVIDER_PRESETS: ProviderPreset[] = [
     description: "成本友好的中文模型",
     default_base_url: "https://api.deepseek.com",
     models: [
-      { id: "deepseek-chat", name: "DeepSeek Chat" },
-      { id: "deepseek-reasoner", name: "DeepSeek Reasoner" },
+      { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+      { id: "deepseek-chat", name: "DeepSeek Chat (deprecated 2026-07-24)" },
+      { id: "deepseek-reasoner", name: "DeepSeek Reasoner (deprecated 2026-07-24)" },
     ],
     key_prefix: "sk-",
   },
@@ -495,7 +497,11 @@ export function OnboardingWizard({ onComplete, onSkip }: OnboardingWizardProps) 
     setUploadResult(null);
 
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const API_BASE =
+        process.env.NEXT_PUBLIC_API_URL ||
+        (typeof window !== "undefined"
+          ? `${window.location.protocol}//${window.location.hostname}:8000`
+          : "http://127.0.0.1:8000");
       const formData = new FormData();
       formData.append("file", file);
 
@@ -834,7 +840,7 @@ export function OnboardingWizard({ onComplete, onSkip }: OnboardingWizardProps) 
                               }}
                               isInvalid={Boolean(formErrors.model)}
                               errorMessage={formErrors.model}
-                              placeholder="例如 deepseek-chat"
+                              placeholder="例如 deepseek-v4-flash"
                               inputProps={{ classNames: bauhausFieldClassNames }}
                               classNames={bauhausAutocompleteClassNames}
                             >

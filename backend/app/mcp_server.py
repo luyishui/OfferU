@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
 from sqlalchemy import select, func, update
 
 from app.database import async_session
@@ -19,6 +19,41 @@ from app.models.models import (
     Job, Pool, Resume, ResumeSection,
     Application,
 )
+
+try:
+    from mcp.server.fastmcp import FastMCP
+    HAS_MCP_SERVER = True
+except ImportError:
+    HAS_MCP_SERVER = False
+
+    class FastMCP:  # type: ignore[no-redef]
+        """Small fallback so in-app Agent tools work even when MCP is not installed."""
+
+        def __init__(self, *args, **kwargs):
+            self.settings = type("Settings", (), {"streamable_http_path": "/"})()
+
+        def tool(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        def resource(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        @property
+        def session_manager(self):
+            @asynccontextmanager
+            async def _noop():
+                yield
+
+            return type("NoopSessionManager", (), {"run": lambda self: _noop()})()
+
+        def streamable_http_app(self):
+            raise RuntimeError("MCP package is not installed")
 
 mcp = FastMCP(
     "OfferU Resume AI",

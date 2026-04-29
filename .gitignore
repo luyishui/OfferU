@@ -10,6 +10,7 @@ __pycache__/
 
 # ---- 构建输出 ----
 frontend/.next/
+frontend/.next-dev/
 frontend/out/
 frontend/tsconfig.tsbuildinfo
 extension/.output/
@@ -48,6 +49,9 @@ npm-debug.log*
 coverage/
 .pytest_cache/
 docs/
+artifacts/chrome-e2e-profile/
+artifacts/page-dumps/
+artifacts/screenshots/
 
 # ---- 本地敏感讨论文档 ----
 docs/产品分歧分析_*.md

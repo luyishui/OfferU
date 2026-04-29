@@ -281,7 +281,7 @@ function asStringList(value: unknown): string[] {
   const text = asString(value).trim();
   if (!text) return [];
   return text
-    .split(/[,\n|锛屻€侊紱;]/g)
+    .split(/[,，、；;\n|]+/g)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -681,7 +681,7 @@ function buildFromLegacySections(sections: ProfileSection[]): Partial<ResumeArch
     if (bucketHint.includes("award") || bucketHint.includes("奖")) {
       resumeArchive.awards?.push({
         id: createId("award"),
-        awardName: title || "鑾峰经历",
+        awardName: title || "获奖经历",
         issuer: "",
         awardedAt: "",
         descriptions: normalizeDescriptions(sectionText(section)),
@@ -1370,8 +1370,8 @@ function buildResumeArchiveSyntheticSections(archive: ResumeArchive, updatedAt: 
         toSyntheticSectionId(`award-${item.id}`, sortOrder),
         "custom:c_awards",
         "custom:c_awards",
-        "鑾峰经历",
-        item.awardName || "鑾峰经历",
+        "获奖经历",
+        item.awardName || "获奖经历",
         {
           description: listToBullet(item.descriptions),
           issuer: item.issuer,

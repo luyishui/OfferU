@@ -68,6 +68,7 @@ export default function ScraperPage() {
   const [location, setLocation] = useState("");
   const [runningSource, setRunningSource] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [bossCookie, setBossCookie] = useState("");
   const [bossSaving, setBossSaving] = useState(false);
   const [bossError, setBossError] = useState<string | null>(null);
@@ -78,6 +79,7 @@ export default function ScraperPage() {
       return;
     }
     setError(null);
+    setNotice(null);
     setRunningSource(sourceKey);
     try {
       const parsedKeywords = keywords
@@ -85,18 +87,12 @@ export default function ScraperPage() {
         .map((item) => item.trim())
         .filter(Boolean);
       const result = await runScraper(sourceKey, parsedKeywords, location);
-      refreshTasks();
-      if (result?.pool_id) {
-        const query = new URLSearchParams({
-          tab: "inbox",
-          pool_id: String(result.pool_id),
-          from_scraper: "1",
-        });
-        if (result?.task_id) query.set("task_id", String(result.task_id));
-        router.push(`/jobs?${query.toString()}`);
-      } else {
-        router.push("/jobs?tab=inbox");
-      }
+      await refreshTasks();
+      setNotice(
+        result?.pool_name
+          ? `任务已启动：${result.pool_name}。完成后可在任务记录查看结果。`
+          : "任务已启动，完成后可在任务记录查看结果。"
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -202,6 +198,11 @@ export default function ScraperPage() {
           {error && (
             <div className="bauhaus-panel-sm flex items-center gap-2 bg-[#D02020] px-4 py-3 text-sm font-medium text-white">
               <XCircle size={14} /> {error}
+            </div>
+          )}
+          {notice && (
+            <div className="bauhaus-panel-sm flex items-center gap-2 bg-[#F0C020] px-4 py-3 text-sm font-medium text-black">
+              <CheckCircle size={14} /> {notice}
             </div>
           )}
         </CardBody>
@@ -329,6 +330,23 @@ export default function ScraperPage() {
                       <Clock size={12} />
                       {new Date(task.created_at).toLocaleString("zh-CN")}
                     </span>
+                    {task.result?.pool_id && Number(task.result.created || 0) > 0 && (
+                      <Button
+                        size="sm"
+                        onPress={() => {
+                          const query = new URLSearchParams({
+                            tab: "inbox",
+                            pool_id: String(task.result?.pool_id),
+                            from_scraper: "1",
+                          });
+                          if (task.id) query.set("task_id", task.id);
+                          router.push(`/jobs?${query.toString()}`);
+                        }}
+                        className="bauhaus-button bauhaus-button-outline !mt-3 !min-h-8 !px-3 !py-2 !text-[11px]"
+                      >
+                        查看结果
+                      </Button>
+                    )}
                   </div>
                 </CardBody>
               </Card>

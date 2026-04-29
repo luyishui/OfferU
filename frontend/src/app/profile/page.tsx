@@ -93,9 +93,17 @@ export default function ProfilePage() {
       setImporting(true);
       setError("");
       const result = await importProfileResume(file);
+      const importedBase = result.base_info || {};
+      const importedBaseInfo = {
+        ...(profile?.base_info_json || {}),
+        personal_archive: undefined,
+        ...importedBase,
+      };
       // Merge imported data into archive
       const rawArchive = normalizePersonalArchiveFromProfile({
         ...profile,
+        name: importedBase.name || profile?.name || "",
+        base_info_json: importedBaseInfo,
         sections: result.bullets?.map((b: any) => ({
           ...b,
           category_key: b.section_type,
@@ -106,7 +114,36 @@ export default function ProfilePage() {
           source: "ai_import",
         })) || [],
       } as any);
-      setArchive(rawArchive);
+      rawArchive.resumeArchive.basicInfo = {
+        ...rawArchive.resumeArchive.basicInfo,
+        name: importedBase.name || rawArchive.resumeArchive.basicInfo.name,
+        phone: importedBase.phone || rawArchive.resumeArchive.basicInfo.phone,
+        email: importedBase.email || rawArchive.resumeArchive.basicInfo.email,
+        currentCity: importedBase.current_city || rawArchive.resumeArchive.basicInfo.currentCity,
+        jobIntention: importedBase.job_intention || rawArchive.resumeArchive.basicInfo.jobIntention,
+        website: importedBase.website || rawArchive.resumeArchive.basicInfo.website,
+        github: importedBase.github || rawArchive.resumeArchive.basicInfo.github,
+      };
+
+      const importedSummary = importedBase.summary || importedBase.personal_summary;
+      if (importedSummary && !rawArchive.resumeArchive.personalSummary) {
+        rawArchive.resumeArchive.personalSummary = importedSummary;
+      }
+
+      const syncedArchive = applyResumeToApplicationSync(rawArchive, [...SHARED_ROOT_PATHS], true).nextArchive;
+      const basicInfo = syncedArchive.resumeArchive.basicInfo;
+      syncedArchive.applicationArchive.identityContact = {
+        ...syncedArchive.applicationArchive.identityContact,
+        chineseName: basicInfo.name || syncedArchive.applicationArchive.identityContact.chineseName,
+        phone: basicInfo.phone || syncedArchive.applicationArchive.identityContact.phone,
+        email: basicInfo.email || syncedArchive.applicationArchive.identityContact.email,
+        currentCity: basicInfo.currentCity || syncedArchive.applicationArchive.identityContact.currentCity,
+      };
+      syncedArchive.applicationArchive.jobPreference = {
+        ...syncedArchive.applicationArchive.jobPreference,
+        expectedPosition: basicInfo.jobIntention || syncedArchive.applicationArchive.jobPreference.expectedPosition,
+      };
+      setArchive(syncedArchive);
       setNotice(`已导入 ${file.name}`);
     } catch (err: any) {
       setError(err.message || "导入失败");

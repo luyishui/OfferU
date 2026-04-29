@@ -38,7 +38,7 @@ export default function AnalyticsPage() {
 
   const statCards = [
     {
-      label: "This Week",
+      label: "本周",
       title: "本周新增",
       value: `${thisWeek?.total ?? 0} 条`,
       note: "最近 7 天采集到的新岗位总量。",
@@ -47,7 +47,7 @@ export default function AnalyticsPage() {
       change: totalChange,
     },
     {
-      label: "Last Week",
+      label: "上周",
       title: "上周新增",
       value: `${lastWeek?.total ?? 0} 条`,
       note: "上一时间窗口的对照数据。",
@@ -56,7 +56,7 @@ export default function AnalyticsPage() {
       change: 0,
     },
     {
-      label: "Sources",
+      label: "来源",
       title: "来源数量",
       value: `${report?.source_distribution?.length ?? 0} 个`,
       note: "当前参与周报统计的数据源。",
@@ -76,19 +76,19 @@ export default function AnalyticsPage() {
       <motion.section variants={item} className="bauhaus-panel overflow-hidden bg-white">
         <div className="grid gap-6 p-6 md:p-8 xl:grid-cols-[1.1fr_0.9fr]">
           <div className="space-y-4">
-            <span className="bauhaus-chip bg-[#F0C020]">Weekly Signal Report</span>
+            <span className="bauhaus-chip bg-[#F0C020]">渠道周报</span>
             <div>
-              <p className="bauhaus-label text-black/55">Analytics Board</p>
-              <h1 className="mt-3 text-5xl font-black uppercase leading-[0.88] tracking-[-0.08em] sm:text-6xl">
-                Measure
+              <p className="bauhaus-label text-black/55">分析中心</p>
+              <h1 className="mt-3 text-4xl font-black leading-tight text-black sm:text-5xl">
+                趋势
                 <br />
-                Track
+                来源
                 <br />
-                Adjust
+                关键词
               </h1>
               <p className="mt-4 max-w-2xl text-base font-medium leading-relaxed text-black/72">
-                把采集趋势、来源结构和关键词热度整理成一张几何海报，方便我们快速判断本周岗位池是否足够活跃，
-                以及接下来该把精力投入到哪些方向。
+                仪表盘负责下一步行动，分析页负责复盘渠道质量。这里集中看采集趋势、来源结构和关键词热度，
+                判断本周岗位池是否足够活跃，以及下一轮该把精力投到哪些方向。
               </p>
             </div>
           </div>
@@ -101,7 +101,7 @@ export default function AnalyticsPage() {
                     <p className={`bauhaus-label ${stat.surface.includes("text-white") ? "text-white/70" : "text-black/55"}`}>
                       {stat.label}
                     </p>
-                    <p className="mt-3 text-3xl font-black uppercase tracking-[-0.08em]">{stat.value}</p>
+                    <p className="mt-3 text-3xl font-black">{stat.value}</p>
                   </div>
                   <div className={`flex h-11 w-11 items-center justify-center border-2 border-black ${stat.accent}`}>
                     <ChangeIcon value={stat.change} />
@@ -120,8 +120,8 @@ export default function AnalyticsPage() {
         <Card className="bauhaus-panel overflow-hidden rounded-none bg-white shadow-none">
           <CardHeader className="border-b-2 border-black bg-[#1040C0] px-6 py-5 text-white">
             <div>
-              <p className="bauhaus-label text-white/70">Trend Report</p>
-              <h2 className="mt-2 text-3xl font-black uppercase tracking-[-0.06em]">采集趋势</h2>
+              <p className="bauhaus-label text-white/70">趋势报告</p>
+              <h2 className="mt-2 text-3xl font-black">采集趋势</h2>
             </div>
           </CardHeader>
           <CardBody className="p-5">
@@ -132,8 +132,8 @@ export default function AnalyticsPage() {
         <Card className="bauhaus-panel overflow-hidden rounded-none bg-white shadow-none">
           <CardHeader className="border-b-2 border-black bg-[#F0C020] px-6 py-5 text-black">
             <div>
-              <p className="bauhaus-label text-black/60">Source Mix</p>
-              <h2 className="mt-2 text-3xl font-black uppercase tracking-[-0.06em]">来源分布</h2>
+              <p className="bauhaus-label text-black/60">来源结构</p>
+              <h2 className="mt-2 text-3xl font-black">来源分布</h2>
             </div>
           </CardHeader>
           <CardBody className="p-5">
@@ -163,8 +163,8 @@ export default function AnalyticsPage() {
         <Card className="bauhaus-panel overflow-hidden rounded-none bg-white shadow-none">
           <CardHeader className="border-b-2 border-black bg-[#D02020] px-6 py-5 text-white">
             <div>
-              <p className="bauhaus-label text-white/70">Top Terms</p>
-              <h2 className="mt-2 text-3xl font-black uppercase tracking-[-0.06em]">热门关键词</h2>
+              <p className="bauhaus-label text-white/70">高频词</p>
+              <h2 className="mt-2 text-3xl font-black">热门关键词</h2>
             </div>
           </CardHeader>
           <CardBody className="p-5">

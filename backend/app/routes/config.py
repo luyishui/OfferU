@@ -41,8 +41,10 @@ PROVIDER_PRESETS: list[dict[str, Any]] = [
         "description": "Cost-effective Chinese/English model",
         "default_base_url": "https://api.deepseek.com",
         "models": [
-            {"id": "deepseek-chat", "name": "DeepSeek Chat", "description": "DeepSeek-V3.2 non-thinking mode"},
-            {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "description": "DeepSeek-V3.2 reasoning mode"},
+            {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "description": "Current fast non-thinking model"},
+            {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "description": "Current high-quality reasoning model"},
+            {"id": "deepseek-chat", "name": "DeepSeek Chat (deprecated 2026-07-24)", "description": "Legacy alias for DeepSeek V4 Flash"},
+            {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner (deprecated 2026-07-24)", "description": "Legacy alias for DeepSeek V4 reasoning mode"},
         ],
         "key_prefix": "sk-",
     },
@@ -173,7 +175,7 @@ class ConfigUpdate(BaseModel):
     profile_source_sync_enabled: bool = False
 
     llm_provider: str = "deepseek"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
 
     deepseek_api_key: str = ""
     openai_api_key: str = ""

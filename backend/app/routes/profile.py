@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -376,34 +377,367 @@ async def _generate_chat_payload(topic: str, user_message: str) -> dict[str, Any
     }
 
 
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+PHONE_RE = re.compile(r"(?:\+?86[-\s]?)?(1[3-9]\d{9})")
+URL_RE = re.compile(r"https?://[^\s，,；;]+|(?:github|linkedin)\.com/[^\s，,；;]+", re.IGNORECASE)
+DATE_TOKEN_PATTERN = r"(?:19|20)\d{2}(?:[./-]\d{1,2}|年\s*\d{1,2}\s*月?)?"
+DATE_RANGE_RE = re.compile(
+    rf"(?P<start>{DATE_TOKEN_PATTERN})\s*(?:-|–|—|~|至|到)\s*"
+    rf"(?P<end>至今|现在|目前|{DATE_TOKEN_PATTERN})",
+    re.IGNORECASE,
+)
+
+SECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("education", re.compile(r"^(教育经历|教育背景|学历|教育|主修课程|课程)$", re.IGNORECASE)),
+    ("internship", re.compile(r"^(实习经历|实习经验|实习)$", re.IGNORECASE)),
+    ("experience", re.compile(r"^(工作经历|工作经验|实践经历|社会实践|校园经历)$", re.IGNORECASE)),
+    ("project", re.compile(r"^(项目经历|项目经验|项目|科研经历|研究经历)$", re.IGNORECASE)),
+    ("skill", re.compile(r"^(技能|技能清单|专业技能|技能与证书|技能特长|技术栈|工具)$", re.IGNORECASE)),
+    ("certificate", re.compile(r"^(证书|证书资质|语言能力|语言|英语|英语水平|语言水平|资质证书)$", re.IGNORECASE)),
+    ("award", re.compile(r"^(获奖经历|荣誉奖项|奖项|荣誉|奖励)$", re.IGNORECASE)),
+    ("summary", re.compile(r"^(个人简介|自我评价|个人总结|Profile|Summary)$", re.IGNORECASE)),
+]
+
+
+def _clean_resume_line(raw: str) -> str:
+    line = (raw or "").strip().lstrip("-*•·●▪▫").strip()
+    line = re.sub(r"\s+", " ", line)
+    return line.strip()
+
+
+def _split_label_value(line: str) -> tuple[str, str] | None:
+    match = re.match(r"^([^:：]{1,18})[:：]\s*(.+)$", line)
+    if not match:
+        return None
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def _section_from_heading(line: str) -> tuple[str | None, str]:
+    label_value = _split_label_value(line)
+    heading = label_value[0] if label_value else line
+    remainder = label_value[1] if label_value else ""
+    heading = heading.strip()
+    for section_key, pattern in SECTION_PATTERNS:
+        if pattern.match(heading):
+            return section_key, remainder
+    return None, ""
+
+
+def _is_contact_or_base_line(line: str) -> bool:
+    if EMAIL_RE.search(line) or PHONE_RE.search(line):
+        return True
+    label_value = _split_label_value(line)
+    if not label_value:
+        return False
+    label = label_value[0]
+    return bool(
+        re.search(
+            r"姓名|邮箱|邮件|电话|手机|联系方式|微信|现居|所在地|城市|地址|求职意向|期望职位|目标岗位|GitHub|LinkedIn|个人网站|网站",
+            label,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _extract_labeled_value(lines: list[str], pattern: str) -> str:
+    regex = re.compile(pattern, re.IGNORECASE)
+    for line in lines:
+        label_value = _split_label_value(line)
+        if label_value and regex.search(label_value[0]):
+            return label_value[1].strip()
+    return ""
+
+
+def _extract_resume_base_info(resume_text: str) -> dict[str, str]:
+    lines = [_clean_resume_line(raw) for raw in (resume_text or "").splitlines()]
+    lines = [line for line in lines if line]
+    joined = "\n".join(lines)
+
+    base_info: dict[str, str] = {}
+
+    email = EMAIL_RE.search(joined)
+    if email:
+        base_info["email"] = email.group(0)
+
+    phone = PHONE_RE.search(joined)
+    if phone:
+        base_info["phone"] = phone.group(1)
+
+    website_candidates = URL_RE.findall(joined)
+    for url in website_candidates:
+        normalized_url = url if url.startswith("http") else f"https://{url}"
+        if "github.com" in normalized_url.lower() and "github" not in base_info:
+            base_info["github"] = normalized_url
+        elif "linkedin.com" in normalized_url.lower() and "linkedin" not in base_info:
+            base_info["linkedin"] = normalized_url
+        elif "website" not in base_info:
+            base_info["website"] = normalized_url
+
+    name = _extract_labeled_value(lines, r"姓名|名字")
+    if not name:
+        for line in lines[:8]:
+            section_key, _ = _section_from_heading(line)
+            if section_key or _is_contact_or_base_line(line):
+                continue
+            if len(line) <= 12 and not re.search(r"\d|@|简历|求职|岗位|电话|邮箱", line, re.IGNORECASE):
+                name = line
+                break
+    if name:
+        base_info["name"] = name
+
+    city = _extract_labeled_value(lines, r"现居|所在地|城市|地址")
+    if city:
+        base_info["current_city"] = city
+
+    job_intention = _extract_labeled_value(lines, r"求职意向|期望职位|目标岗位|应聘岗位")
+    if job_intention:
+        base_info["job_intention"] = job_intention
+
+    summary = _extract_labeled_value(lines, r"个人简介|自我评价|个人总结|Summary|Profile")
+    if not summary:
+        collecting = False
+        summary_lines: list[str] = []
+        for line in lines:
+            section_key, remainder = _section_from_heading(line)
+            if section_key == "summary":
+                collecting = True
+                if remainder:
+                    summary_lines.append(remainder)
+                continue
+            if collecting and section_key:
+                break
+            if collecting and not _is_contact_or_base_line(line):
+                summary_lines.append(line)
+            if len(summary_lines) >= 3:
+                break
+        summary = " ".join(summary_lines).strip()
+    if summary:
+        base_info["summary"] = summary
+        base_info["personal_summary"] = summary
+
+    return base_info
+
+
+def _extract_date_range(line: str) -> tuple[str, str]:
+    match = DATE_RANGE_RE.search(line)
+    if not match:
+        return "", ""
+    return re.sub(r"\s+", "", match.group("start")), re.sub(r"\s+", "", match.group("end"))
+
+
+def _first_match(pattern: str, text: str, default: str = "") -> str:
+    match = re.search(pattern, text, re.IGNORECASE)
+    return match.group(1).strip() if match else default
+
+
+def _strip_heading_prefix(line: str) -> str:
+    label_value = _split_label_value(line)
+    if label_value:
+        return label_value[1].strip()
+    return re.sub(
+        r"^(教育经历|教育背景|实习经历|工作经历|项目经历|技能|技能清单|证书|语言能力|获奖经历|荣誉奖项)\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _infer_resume_section(line: str, current_section: str | None) -> str:
+    if re.search(r"六级|四级|CET|IELTS|TOEFL|雅思|托福|资格证|普通话", line, re.IGNORECASE):
+        return "certificate"
+    if re.search(r"获奖|奖学金|一等奖|二等奖|三等奖|优秀|荣誉", line, re.IGNORECASE):
+        return "award"
+    if current_section in {"education", "internship", "experience", "project", "skill", "certificate", "award"}:
+        return current_section
+    if re.search(r"大学|学院|学校|本科|硕士|博士|学士|大专|GPA|绩点|专业", line, re.IGNORECASE):
+        return "education"
+    if re.search(r"六级|四级|CET|IELTS|TOEFL|雅思|托福|证书|资格证|普通话", line, re.IGNORECASE):
+        return "certificate"
+    if re.search(r"Python|SQL|Excel|Office|Tableau|PowerBI|React|Java|熟练|技能", line, re.IGNORECASE):
+        return "skill"
+    if re.search(r"项目|系统|平台|模型|课题|研究|算法|数据分析", line, re.IGNORECASE):
+        return "project"
+    if re.search(r"公司|集团|银行|科技|咨询|证券|实习|运营|产品|工程师|分析师|研究员|助理|负责", line, re.IGNORECASE):
+        return "experience"
+    if re.search(r"获奖|奖学金|一等奖|二等奖|三等奖|优秀|荣誉", line, re.IGNORECASE):
+        return "award"
+    return "custom"
+
+
+def _candidate_from_resume_line(line: str, current_section: str | None, index: int) -> dict[str, Any] | None:
+    text = _strip_heading_prefix(line)
+    if len(text) < 4 or _is_contact_or_base_line(text):
+        return None
+
+    section_key = _infer_resume_section(text, current_section)
+    start_date, end_date = _extract_date_range(text)
+
+    if section_key == "education":
+        school = _first_match(r"([\w\u4e00-\u9fa5·（）() -]{2,40}(?:大学|学院|学校|University|College))", text)
+        degree = _first_match(r"(博士|硕士|研究生|本科|学士|大专|专科)", text)
+        gpa = _first_match(r"(?:GPA|绩点)[:：]?\s*([0-9.]+(?:/[0-9.]+)?)", text)
+        major = _first_match(r"(?:专业[:：]?\s*)([\w\u4e00-\u9fa5·（）() -]{2,40})", text)
+        if not major and school:
+            rest = text.replace(school, " ").replace(degree, " ")
+            rest = DATE_RANGE_RE.sub(" ", rest)
+            rest = re.sub(r"(?:GPA|绩点)[:：]?\s*[0-9.]+(?:/[0-9.]+)?", " ", rest, flags=re.IGNORECASE).strip()
+            major = rest[:40].strip(" ，,|")
+        return {
+            "section_type": "education",
+            "title": school or "教育经历",
+            "content_json": {
+                "school": school or text[:40],
+                "degree": degree,
+                "major": major,
+                "start_date": start_date,
+                "end_date": end_date,
+                "gpa": gpa,
+                "description": text,
+                "bullet": text,
+            },
+            "confidence": 0.62,
+        }
+
+    if section_key in {"experience", "internship"}:
+        company = _first_match(
+            r"([\w\u4e00-\u9fa5·（）()& -]{2,50}(?:公司|集团|银行|科技|咨询|证券|中心|研究院|实验室|事务所|有限|股份))",
+            text,
+        )
+        compact = DATE_RANGE_RE.sub(" ", text)
+        position = ""
+        if company:
+            tail = compact.replace(company, " ", 1).strip(" ，,|-")
+            position = re.split(r"负责|参与|完成|主导|协助", tail, maxsplit=1)[0].strip(" ，,|-")
+        if not position:
+            position = _first_match(r"((?:产品|运营|数据|市场|研发|算法|后端|前端|财务|咨询|人力|销售|研究|分析)[\w\u4e00-\u9fa5]{0,16}(?:实习生|助理|经理|工程师|分析师|研究员)?)", text)
+        is_internship = section_key == "internship" or "实习" in text or "实习" in (current_section or "")
+        title = f"实习经历 - {company}" if is_internship and company else (company or ("实习经历" if is_internship else "工作经历"))
+        return {
+            "section_type": "experience",
+            "title": title,
+            "content_json": {
+                "company": company or text[:40],
+                "position": position,
+                "start_date": start_date,
+                "end_date": end_date,
+                "description": text,
+                "bullet": text,
+            },
+            "confidence": 0.62,
+        }
+
+    if section_key == "project":
+        name = _first_match(r"([\w\u4e00-\u9fa5·（）() -]{2,50}(?:项目|系统|平台|模型|课题|研究))", text)
+        if not name:
+            name = re.split(r"负责|参与|完成|主导|协助|[:：|]", text, maxsplit=1)[0].strip()[:50]
+        return {
+            "section_type": "project",
+            "title": name or "项目经历",
+            "content_json": {
+                "name": name or text[:40],
+                "role": "",
+                "start_date": start_date,
+                "end_date": end_date,
+                "description": text,
+                "bullet": text,
+            },
+            "confidence": 0.6,
+        }
+
+    if section_key == "skill":
+        cleaned = re.sub(r"^(技能|技能清单|专业技能)[:：]?", "", text, flags=re.IGNORECASE).strip()
+        items = [item.strip() for item in re.split(r"[,，、；;|/\n]", cleaned) if item.strip()]
+        return {
+            "section_type": "skill",
+            "title": "技能清单",
+            "content_json": {
+                "category": "技能",
+                "items": items or [cleaned],
+                "bullet": cleaned,
+            },
+            "confidence": 0.58,
+        }
+
+    if section_key == "certificate":
+        return {
+            "section_type": "certificate",
+            "title": "证书资质",
+            "content_json": {
+                "name": text,
+                "issuer": "",
+                "date": "",
+                "bullet": text,
+            },
+            "confidence": 0.58,
+        }
+
+    if section_key == "award":
+        return {
+            "section_type": "custom",
+            "title": "获奖经历",
+            "content_json": {
+                "subtitle": "获奖经历",
+                "description": text,
+                "bullet": text,
+            },
+            "confidence": 0.55,
+        }
+
+    return {
+        "section_type": "custom",
+        "title": f"个人经历 {index + 1}",
+        "content_json": {
+            "subtitle": f"个人经历 {index + 1}",
+            "description": text,
+            "bullet": text,
+        },
+        "confidence": 0.5,
+    }
+
+
 def _fallback_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
-    lines: list[str] = []
+    candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
+    current_section: str | None = None
+
     for raw in (resume_text or "").splitlines():
-        line = raw.strip().lstrip("-*• ").strip()
-        if len(line) < 10:
+        line = _clean_resume_line(raw)
+        if not line:
             continue
+        section_key, remainder = _section_from_heading(line)
+        line_section = current_section
+        if section_key:
+            if not remainder:
+                current_section = section_key
+                continue
+            line_section = section_key
+            line = remainder
+
+        if line_section == "summary" or _is_contact_or_base_line(line):
+            continue
+        if len(line) < 4:
+            continue
+
         key = line.lower()
         if key in seen:
             continue
         seen.add(key)
-        lines.append(line)
-        if len(lines) >= 8:
+
+        candidate = _candidate_from_resume_line(line, line_section, len(candidates))
+        if candidate:
+            candidates.append(_normalize_candidate(candidate["section_type"], candidate))
+        if len(candidates) >= 12:
             break
 
-    if not lines and (resume_text or "").strip():
+    if not candidates and (resume_text or "").strip():
         snippet = " ".join((resume_text or "").split())
-        lines = [snippet[:180]]
-
-    candidates = []
-    for idx, line in enumerate(lines):
         candidates.append(
             _normalize_candidate(
                 "custom",
                 {
                     "section_type": "custom",
-                    "title": f"导入经历条目 {idx + 1}",
-                    "content_json": {"bullet": line},
+                    "title": "个人经历 1",
+                    "content_json": {"subtitle": "个人经历 1", "description": snippet[:180], "bullet": snippet[:180]},
                     "confidence": 0.55,
                 },
             )
@@ -919,6 +1253,7 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
         raise HTTPException(status_code=400, detail="resume text is empty")
 
     profile = await _get_or_create_default_profile(db)
+    base_info = _extract_resume_base_info(parsed_text)
     candidates = await _extract_resume_candidates(parsed_text)
 
     session = ProfileChatSession(
@@ -935,6 +1270,7 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
                 "kind": "resume_import_meta",
                 "filename": filename,
                 "text_length": len(parsed_text),
+                "base_info": base_info,
             },
             {
                 "kind": "bullet_candidates",
@@ -961,6 +1297,7 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
         "session_id": session.id,
         "filename": filename,
         "text_length": len(parsed_text),
+        "base_info": base_info,
         "bullets": bullets,
     }
 

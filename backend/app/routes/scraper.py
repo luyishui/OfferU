@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
@@ -181,6 +181,8 @@ async def _execute_scraper(task_info: dict, scraper, req: RunRequest):
                 from app.routes.config import _current_config
                 if not _current_config.zhilian_cookie:
                     warning = "未获取到数据，可尝试在设置页配置智联招聘 Cookie"
+            if not warning:
+                warning = "本次任务没有抓到新岗位，可能是关键词/城市无结果，或平台反爬拦截。"
 
         created = 0
         skipped = 0
@@ -227,7 +229,7 @@ async def _execute_scraper(task_info: dict, scraper, req: RunRequest):
                 await db.execute(select(Batch).where(Batch.id == task_info.get("batch_id")))
             ).scalar_one_or_none()
             if batch:
-                batch.total_fetched = (batch.total_fetched or 0) + created
+                batch.total_fetched = (batch.total_fetched or 0) + len(items)
                 batch.job_count = created
                 batch.status = "completed"
 
@@ -258,6 +260,57 @@ async def _execute_scraper(task_info: dict, scraper, req: RunRequest):
 
 
 @router.get("/tasks")
-async def list_tasks():
-    """获取最近的爬取任务列表"""
-    return list(reversed(_tasks[-50:]))
+async def list_tasks(db: AsyncSession = Depends(get_db)):
+    """获取最近的爬取任务列表。内存任务丢失时，回退展示数据库中的批次记录。"""
+    memory_tasks = list(reversed(_tasks[-50:]))
+    seen_batches = {
+        item.get("batch_id")
+        for item in memory_tasks
+        if isinstance(item, dict) and item.get("batch_id")
+    }
+
+    persisted_tasks: list[dict] = []
+    batches = (
+        await db.execute(
+            select(Batch)
+            .order_by(Batch.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+
+    for batch in batches:
+        if batch.id in seen_batches:
+            continue
+        created = (
+            await db.execute(
+                select(func.count()).select_from(Job).where(Job.batch_id == batch.id)
+            )
+        ).scalar() or 0
+        warning = ""
+        total_fetched = int(batch.total_fetched or created or 0)
+        if batch.status == "completed" and total_fetched == 0:
+            warning = "本次任务没有抓到新岗位，可能是关键词/城市无结果、平台需要 Cookie，或平台反爬拦截。"
+        elif batch.status == "completed" and int(created) == 0 and total_fetched > 0:
+            warning = f"本次抓到 {total_fetched} 个岗位，但都已存在，因此没有新增。"
+        persisted_tasks.append(
+            {
+                "id": batch.id,
+                "batch_id": batch.id,
+                "pool_id": None,
+                "pool_name": "",
+                "source": batch.source,
+                "keywords": batch.keywords or [],
+                "location": batch.location or "",
+                "status": batch.status,
+                "created_at": batch.created_at.isoformat() if batch.created_at else "",
+                "result": {
+                    "created": int(created),
+                    "skipped": max(total_fetched - int(created), 0),
+                    "total": total_fetched,
+                    "batch_id": batch.id,
+                    "warning": warning,
+                },
+            }
+        )
+
+    return (memory_tasks + persisted_tasks)[:50]

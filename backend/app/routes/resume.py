@@ -35,6 +35,7 @@ import re
 import uuid
 from io import BytesIO
 from typing import Optional, Any
+from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
@@ -816,7 +817,7 @@ DEFAULT_HTML_TEMPLATE = Template("""<!DOCTYPE html>
                     <div class="skill-group">
                         {% if group.category %}<div class="skill-category">{{ group.category }}</div>{% endif %}
                         <div class="skills-list">
-                            {% for s in group.items %}
+                            {% for s in group.get("items", []) %}
                                 <span class="skill-tag">{{ s }}</span>
                             {% endfor %}
                         </div>
@@ -1033,16 +1034,199 @@ def _normalize_export_image_scale(scale: float) -> float:
     return max(1.0, min(scale, 2.2))
 
 
-def _render_resume_pdf_bytes(html_str: str) -> bytes:
+def _extract_pdf_fallback_lines(html_str: str) -> list[tuple[str, str]]:
     try:
-        from weasyprint import HTML
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"WeasyPrint unavailable: {exc}")
+        from bs4 import BeautifulSoup
+    except Exception:
+        text = re.sub(r"<[^>]+>", "\n", html_str or "")
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+        return [("body", line) for line in lines if line]
+
+    soup = BeautifulSoup(html_str or "", "html.parser")
+    for tag in soup(["style", "script", "template"]):
+        tag.decompose()
+
+    selectors = [
+        ".name",
+        ".contact-line",
+        ".sidebar-title",
+        ".skill-category",
+        ".skill-tag",
+        ".section-title",
+        ".entry-title",
+        ".entry-meta",
+        ".entry-sub",
+        ".entry-desc",
+        "h1",
+        "h2",
+        "h3",
+        "p",
+        "li",
+    ]
+
+    lines: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for element in soup.select(",".join(selectors)):
+        text = re.sub(r"\s+", " ", element.get_text(" ", strip=True)).strip()
+        if not text:
+            continue
+
+        classes = set(element.get("class") or [])
+        if "name" in classes or element.name == "h1":
+            kind = "title"
+        elif classes.intersection({"sidebar-title", "section-title"}) or element.name in {"h2", "h3"}:
+            kind = "heading"
+        else:
+            kind = "body"
+
+        key = (kind, text)
+        if key not in seen:
+            lines.append(key)
+            seen.add(key)
+
+    if lines:
+        return lines
+
+    body = soup.body or soup
+    text = body.get_text("\n", strip=True)
+    normalized = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return [("body", line) for line in normalized if line]
+
+
+def _register_reportlab_cjk_font() -> str:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    font_name = "OfferUFallbackCJK"
+    if font_name in pdfmetrics.getRegisteredFontNames():
+        return font_name
+
+    font_candidates = [
+        os.environ.get("OFFERU_PDF_FONT", ""),
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\Deng.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ]
+
+    for font_path in font_candidates:
+        if not font_path or not os.path.exists(font_path):
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(font_name, font_path, subfontIndex=0))
+            return font_name
+        except Exception:
+            continue
+
+    return "Helvetica"
+
+
+def _render_resume_pdf_with_reportlab(html_str: str) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    font_name = _register_reportlab_cjk_font()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+        title="OfferU Resume",
+    )
+
+    base_style = {
+        "fontName": font_name,
+        "wordWrap": "CJK",
+    }
+    styles = {
+        "title": ParagraphStyle(
+            "OfferUTitle",
+            **base_style,
+            fontSize=16,
+            leading=22,
+            spaceAfter=8,
+        ),
+        "heading": ParagraphStyle(
+            "OfferUHeading",
+            **base_style,
+            fontSize=11,
+            leading=16,
+            spaceBefore=8,
+            spaceAfter=5,
+        ),
+        "body": ParagraphStyle(
+            "OfferUBody",
+            **base_style,
+            fontSize=9.5,
+            leading=14,
+            spaceAfter=4,
+        ),
+    }
+
+    lines = _extract_pdf_fallback_lines(html_str)
+    if not lines:
+        lines = [("title", "OfferU Resume"), ("body", "No resume content available.")]
+
+    story = []
+    for kind, text in lines:
+        style = styles.get(kind, styles["body"])
+        story.append(Paragraph(xml_escape(text), style))
+        if kind in {"title", "heading"}:
+            story.append(Spacer(1, 2))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _can_try_weasyprint() -> bool:
+    if os.name != "nt":
+        return True
 
     try:
-        return HTML(string=html_str).write_pdf()
+        import ctypes.util
+    except Exception:
+        return True
+
+    return bool(ctypes.util.find_library("libgobject-2.0-0"))
+
+
+def _render_resume_pdf_bytes(html_str: str) -> bytes:
+    weasy_error: Exception | None = None
+
+    if not _can_try_weasyprint():
+        weasy_error = RuntimeError("WeasyPrint native GTK/Pango libraries were not found")
+    else:
+        try:
+            from weasyprint import HTML
+        except Exception as exc:
+            weasy_error = exc
+        else:
+            try:
+                return HTML(string=html_str).write_pdf()
+            except Exception as exc:
+                weasy_error = exc
+
+    try:
+        return _render_resume_pdf_with_reportlab(html_str)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to render PDF: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to render PDF. "
+                f"WeasyPrint error: {weasy_error}; "
+                f"ReportLab fallback error: {exc}"
+            ),
+        )
 
 
 def _build_export_image_cache_key(resume: Resume, scale: float) -> tuple[int, str, str]:

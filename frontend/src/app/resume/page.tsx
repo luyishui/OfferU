@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardBody, Button, Chip, Input, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter, useDisclosure, Checkbox, Textarea } from "@nextui-org/react";
@@ -80,6 +80,17 @@ export default function ResumesListPage() {
     const t = setTimeout(() => setActionError(""), 5500);
     return () => clearTimeout(t);
   }, [actionError]);
+
+  const openResume = (resumeId: number) => {
+    router.push(`/resume/${resumeId}`);
+  };
+
+  const handleResumeCardKeyDown = (event: KeyboardEvent<HTMLDivElement>, resumeId: number) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openResume(resumeId);
+    }
+  };
 
   /** 创建新简历并跳转到编辑器 */
   const handleCreate = async () => {
@@ -298,52 +309,59 @@ export default function ResumesListPage() {
               className="min-w-0"
             >
               <Card
-                isPressable
                 className="bauhaus-panel bauhaus-lift group h-full min-h-[380px] w-full rounded-none bg-[var(--surface)] shadow-none aspect-[3/5]"
-                onPress={() => router.push(`/resume/${resume.id}`)}
               >
                 <CardBody className="flex h-full flex-col gap-4 p-4 md:p-5">
-                  {/* 缩略图占位 */}
-                  <div className="relative flex min-h-[180px] h-[58%] items-center justify-center overflow-hidden border border-black/12 bg-[var(--surface-muted)]">
-                    <div className="absolute inset-0 bg-[radial-gradient(#121212_1.2px,transparent_1.2px)] bg-[size:20px_20px] opacity-05" />
-                    <div className="absolute left-4 top-4 h-4 w-4 rounded-full bg-[#e8d2cd]" />
-                    <div className="absolute bottom-4 right-4 h-4 w-4 rotate-45 bg-[#d8e2da]" />
-                    <FileText size={36} className="relative z-10 text-black/30" />
-                  </div>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`编辑 ${resume.title || "未命名简历"}`}
+                    onClick={() => openResume(resume.id)}
+                    onKeyDown={(event) => handleResumeCardKeyDown(event, resume.id)}
+                    className="flex min-h-0 flex-1 cursor-pointer flex-col gap-4 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black/45"
+                  >
+                    {/* 缩略图占位 */}
+                    <div className="relative flex min-h-[180px] h-[58%] items-center justify-center overflow-hidden border border-black/12 bg-[var(--surface-muted)]">
+                      <div className="absolute inset-0 bg-[radial-gradient(#121212_1.2px,transparent_1.2px)] bg-[size:20px_20px] opacity-05" />
+                      <div className="absolute left-4 top-4 h-4 w-4 rounded-full bg-[#e8d2cd]" />
+                      <div className="absolute bottom-4 right-4 h-4 w-4 rotate-45 bg-[#d8e2da]" />
+                      <FileText size={36} className="relative z-10 text-black/30" />
+                    </div>
 
-                  {/* 简历信息 */}
-                  <div className="space-y-1.5 min-h-[96px]">
-                    <h3 className="truncate text-base font-semibold text-black">
-                      {resume.title || "未命名简历"}
-                    </h3>
-                    <div className="flex items-center gap-2 text-xs font-medium text-black/50">
-                      <span>{resume.user_name}</span>
-                      {resume.language && (
-                        <span className="flex items-center gap-0.5">
-                          <Globe size={10} />
-                          {resume.language === "zh" ? "中文" : resume.language === "en" ? "English" : resume.language}
-                        </span>
-                      )}
+                    {/* 简历信息 */}
+                    <div className="space-y-1.5 min-h-[96px]">
+                      <h3 className="truncate text-base font-semibold text-black">
+                        {resume.title || "未命名简历"}
+                      </h3>
+                      <div className="flex items-center gap-2 text-xs font-medium text-black/50">
+                        <span>{resume.user_name}</span>
+                        {resume.language && (
+                          <span className="flex items-center gap-0.5">
+                            <Globe size={10} />
+                            {resume.language === "zh" ? "中文" : resume.language === "en" ? "English" : resume.language}
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        <Chip
+                          size="sm"
+                          variant="flat"
+                          color={getResumeSourceLabel(resume).color}
+                          className={`border border-black/15 text-[10px] ${
+                            getResumeSourceLabel(resume).color === "secondary"
+                              ? "bg-[#e4ece6] text-black"
+                              : getResumeSourceLabel(resume).color === "success"
+                                ? "bg-[#f3ead2] text-black"
+                                : "bg-[var(--surface)] text-black"
+                          }`}
+                        >
+                          {getResumeSourceLabel(resume).text}
+                        </Chip>
+                      </div>
+                      <p className="text-xs font-medium text-black/45">
+                        更新于 {new Date(resume.updated_at).toLocaleDateString("zh-CN")}
+                      </p>
                     </div>
-                    <div>
-                      <Chip
-                        size="sm"
-                        variant="flat"
-                        color={getResumeSourceLabel(resume).color}
-                        className={`border border-black/15 text-[10px] ${
-                          getResumeSourceLabel(resume).color === "secondary"
-                            ? "bg-[#e4ece6] text-black"
-                            : getResumeSourceLabel(resume).color === "success"
-                              ? "bg-[#f3ead2] text-black"
-                              : "bg-[var(--surface)] text-black"
-                        }`}
-                      >
-                        {getResumeSourceLabel(resume).text}
-                      </Chip>
-                    </div>
-                    <p className="text-xs font-medium text-black/45">
-                      更新于 {new Date(resume.updated_at).toLocaleDateString("zh-CN")}
-                    </p>
                   </div>
 
                   {/* 操作按钮 */}
@@ -352,7 +370,7 @@ export default function ResumesListPage() {
                       size="sm"
                       startContent={<Edit3 size={12} />}
                       className="bauhaus-button bauhaus-button-outline !flex-1 !px-4 !py-3 !text-[11px]"
-                      onPress={() => router.push(`/resume/${resume.id}`)}
+                      onPress={() => openResume(resume.id)}
                     >
                       编辑
                     </Button>

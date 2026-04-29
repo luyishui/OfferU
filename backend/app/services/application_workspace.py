@@ -528,6 +528,7 @@ def _build_fixed_values_from_job(job: Job) -> dict[str, Any]:
             values[field_key] = datetime.utcnow().isoformat()
             continue
         values[field_key] = _job_value(job, spec["job_attrs"])
+    values["apply_status"] = "待投递"
     return values
 
 

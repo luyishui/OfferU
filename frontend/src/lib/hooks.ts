@@ -8,14 +8,28 @@
 
 import useSWR from "swr";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined"
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : "http://127.0.0.1:8000");
+
+function formatBackendNetworkError(error: unknown) {
+  const reason = error instanceof Error ? error.message : String(error);
+  return `无法连接本地后端 ${API_BASE}，请确认后端服务已启动。配置 API Key 时浏览器只会请求本地后端，不会直接连接 DeepSeek。原始错误：${reason}`;
+}
 
 /**
  * 通用 fetcher：SWR 默认请求函数
  * 自动处理 JSON 解析和错误码
  */
 const fetcher = async (url: string) => {
-  const res = await fetch(url);
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (error) {
+    throw new Error(formatBackendNetworkError(error));
+  }
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 };
@@ -325,11 +339,16 @@ export async function deletePoolById(poolId: number, scope?: "inbox" | "picked" 
 
 /** 更新系统配置 */
 export async function updateConfig(data: any) {
-  const res = await fetch(`${API_BASE}/api/config/`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/config/`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  } catch (error) {
+    throw new Error(formatBackendNetworkError(error));
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `更新配置失败 (${res.status})`);
@@ -638,6 +657,18 @@ export interface ProfileImportResult {
   session_id: number;
   filename: string;
   text_length: number;
+  base_info?: {
+    name?: string;
+    phone?: string;
+    email?: string;
+    linkedin?: string;
+    github?: string;
+    website?: string;
+    current_city?: string;
+    job_intention?: string;
+    summary?: string;
+    personal_summary?: string;
+  };
   bullets: ProfileBulletCandidate[];
 }
 
@@ -1538,7 +1569,16 @@ export interface ScraperTask {
   location: string;
   status: string;  // "running" | "completed" | "failed"
   created_at: string;
-  result: { created?: number; skipped?: number; total?: number; error?: string; warning?: string } | null;
+  result: {
+    created?: number;
+    skipped?: number;
+    total?: number;
+    error?: string;
+    warning?: string;
+    batch_id?: string;
+    pool_id?: number | null;
+    pool_name?: string;
+  } | null;
 }
 
 /** 获取所有数据源状态 */

@@ -12,7 +12,11 @@ import {
 import { Bot, Loader2, Send, Sparkles, Trash2, User, Wrench } from "lucide-react";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined"
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : "http://127.0.0.1:8000");
 
 interface ChatMsg {
   id: string;
@@ -173,7 +177,7 @@ export default function AgentPage() {
   };
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-5rem)] max-w-6xl flex-col gap-4">
+    <div className="mx-auto flex min-h-[calc(100vh-7rem)] max-w-6xl flex-col gap-4 pb-6">
       <section className="bauhaus-panel overflow-hidden bg-white">
         <div className="flex flex-col gap-5 p-5 md:p-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -224,7 +228,7 @@ export default function AgentPage() {
 
       <ScrollShadow
         ref={scrollRef}
-        className="bauhaus-panel flex-1 min-h-[30rem] overflow-y-auto bg-white p-4 md:p-6"
+        className="bauhaus-panel min-h-[20rem] flex-1 overflow-y-auto bg-white p-4 md:min-h-[24rem] md:p-6"
       >
         <div className="space-y-4">
           {messages.map((msg) => (

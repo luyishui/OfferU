@@ -135,8 +135,10 @@ const FALLBACK_PROVIDER_PRESETS: ProviderPreset[] = [
     description: "Cost-effective Chinese model",
     default_base_url: "https://api.deepseek.com",
     models: [
-      { id: "deepseek-chat", name: "DeepSeek Chat" },
-      { id: "deepseek-reasoner", name: "DeepSeek Reasoner" },
+      { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+      { id: "deepseek-chat", name: "DeepSeek Chat (deprecated 2026-07-24)" },
+      { id: "deepseek-reasoner", name: "DeepSeek Reasoner (deprecated 2026-07-24)" },
     ],
     key_prefix: "sk-",
   },
@@ -1373,7 +1375,7 @@ export default function SettingsPage() {
               }
               isInvalid={Boolean(formErrors.model)}
               errorMessage={formErrors.model}
-              placeholder="例如：deepseek-chat"
+              placeholder="例如：deepseek-v4-flash"
               selectorButtonProps={{
                 size: "sm",
                 variant: "flat",
