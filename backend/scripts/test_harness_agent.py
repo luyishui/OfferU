@@ -9,10 +9,12 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.harness_agent import (  # noqa: E402
     build_career_exploration_fallback,
+    build_application_import_preview,
     classify_intent,
     execute_planned_actions,
     get_default_tool_registry,
     plan_action,
+    run_harness_agent_turn,
 )
 
 
@@ -102,6 +104,55 @@ def test_confirmed_action_ids_execute_only_matching() -> None:
     assert calls == [{"job_ids": [2], "status": "ignored"}]
 
 
+def test_application_import_preview_uses_stable_fields() -> None:
+    job = {
+        "id": 7,
+        "title": "AI Product Intern",
+        "company": "ExampleTech",
+        "location": "Shanghai",
+        "salary_text": "200/day",
+        "source": "shixiseng",
+        "apply_url": "https://example.com/apply",
+        "url": "https://example.com/job",
+    }
+    preview = build_application_import_preview(job)
+    assert preview["company_name"] == "ExampleTech"
+    assert preview["job_title"] == "AI Product Intern"
+    assert preview["location"] == "Shanghai"
+    assert preview["salary_text"] == "200/day"
+    assert preview["source"] == "shixiseng"
+    assert preview["job_link"] == "https://example.com/apply"
+
+
+def test_run_harness_agent_turn_returns_career_mode_with_fallback() -> None:
+    async def fake_tool(name: str, args: dict):
+        if name == "get_profile":
+            return {"name": "Alex", "headline": "content operations"}
+        if name == "list_jobs":
+            return {"jobs": [], "total": 0}
+        return {}
+
+    response = asyncio.run(
+        run_harness_agent_turn(
+            messages=[{"role": "user", "content": "给我 5 个意想不到的职业方向"}],
+            tool_runner=fake_tool,
+        )
+    )
+    assert response["mode"] == "career_exploration"
+    assert response["career_paths"]
+    assert response["requires_confirmation"] is False
+
+
+def test_route_request_model_defaults_confirmation_ids() -> None:
+    from app.routes.harness_agent import HarnessAgentChatRequest
+
+    request = HarnessAgentChatRequest(
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    assert request.confirmed_action_ids == []
+    assert request.messages[0].role == "user"
+
+
 if __name__ == "__main__":
     test_registry_declares_risk_levels()
     test_classify_career_exploration_prompt()
@@ -109,4 +160,7 @@ if __name__ == "__main__":
     test_career_fallback_shape_has_paths_and_next_steps()
     test_confirm_actions_block_batch_writes()
     test_confirmed_action_ids_execute_only_matching()
+    test_application_import_preview_uses_stable_fields()
+    test_run_harness_agent_turn_returns_career_mode_with_fallback()
+    test_route_request_model_defaults_confirmation_ids()
     print("harness agent core tests passed")

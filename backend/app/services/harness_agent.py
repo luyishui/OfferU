@@ -129,6 +129,37 @@ def classify_intent(message: str) -> str:
     return "general"
 
 
+def last_user_message(messages: list[dict[str, str]]) -> str:
+    for message in reversed(messages or []):
+        if message.get("role") == "user":
+            return str(message.get("content") or "")
+    return ""
+
+
+def build_application_import_preview(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "company_name": str(job.get("company") or "").strip(),
+        "job_title": str(job.get("title") or "").strip(),
+        "location": str(job.get("location") or "").strip(),
+        "job_link": str(job.get("apply_url") or job.get("url") or "").strip(),
+        "source": str(job.get("source") or "").strip(),
+        "salary_text": str(job.get("salary_text") or job.get("salary") or "").strip(),
+    }
+
+
+def build_job_card(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(job.get("id") or 0),
+        "title": str(job.get("title") or "").strip(),
+        "company": str(job.get("company") or "").strip(),
+        "location": str(job.get("location") or "").strip(),
+        "salary_text": str(job.get("salary_text") or job.get("salary") or "").strip(),
+        "source": str(job.get("source") or "").strip(),
+        "apply_url": str(job.get("apply_url") or job.get("url") or "").strip(),
+        "summary": str(job.get("summary") or "")[:240],
+    }
+
+
 def build_career_exploration_fallback(
     *,
     profile: dict[str, Any] | None,
@@ -213,6 +244,226 @@ def build_career_exploration_fallback(
             "timeline": "1-2 weeks for validation, 2-4 weeks for portfolio evidence, 4-8 weeks for targeted applications.",
             "note": f"Prompt signal: {user_message[:120]}",
         },
+    }
+
+
+async def default_tool_runner(name: str, args: dict[str, Any]) -> Any:
+    from app.database import async_session
+    from app.mcp_server import (
+        batch_triage,
+        create_application,
+        generate_resume,
+        get_job,
+        get_profile,
+        job_stats,
+        list_applications,
+        list_jobs,
+        list_pools,
+        list_resumes,
+        triage_job,
+    )
+
+    mcp_tools = {
+        "get_profile": get_profile,
+        "list_jobs": list_jobs,
+        "get_job": get_job,
+        "job_stats": job_stats,
+        "list_pools": list_pools,
+        "batch_triage": batch_triage,
+        "generate_resume": generate_resume,
+        "list_resumes": list_resumes,
+        "list_applications": list_applications,
+        "create_application": create_application,
+        "triage_job": triage_job,
+    }
+    if name in mcp_tools:
+        return await mcp_tools[name](**args)
+
+    if name == "list_scraper_sources":
+        from app.routes.scraper import list_sources
+
+        return await list_sources()
+
+    if name == "list_scraper_tasks":
+        from app.routes.scraper import list_tasks
+
+        async with async_session() as db:
+            return await list_tasks(db=db)
+
+    if name == "run_scraper":
+        from app.routes.scraper import RunRequest, run_scraper
+
+        async with async_session() as db:
+            return await run_scraper(RunRequest(**args), db=db)
+
+    if name == "import_jobs_to_application_table":
+        from app.services.application_workspace import create_records_from_jobs
+
+        table_id = int(args.get("table_id") or 0)
+        job_ids = [int(item) for item in args.get("job_ids") or []]
+        async with async_session() as db:
+            return await create_records_from_jobs(db, table_id=table_id, job_ids=job_ids)
+
+    if name == "list_calendar_events":
+        from app.routes.calendar import list_events
+
+        async with async_session() as db:
+            return await list_events(start=args.get("start"), end=args.get("end"), db=db)
+
+    if name == "auto_fill_calendar":
+        from app.routes.calendar import auto_fill_events
+
+        async with async_session() as db:
+            return await auto_fill_events(db=db)
+
+    if name == "list_email_notifications":
+        from app.routes.email import list_notifications
+
+        async with async_session() as db:
+            return await list_notifications(db=db)
+
+    if name == "sync_email_notifications":
+        from app.routes.email import sync_emails
+
+        async with async_session() as db:
+            return await sync_emails(db=db)
+
+    if name == "list_interview_questions":
+        from app.routes.interview import list_questions
+
+        async with async_session() as db:
+            return await list_questions(
+                company=args.get("company"),
+                role=args.get("role"),
+                job_id=args.get("job_id"),
+                category=args.get("category"),
+                db=db,
+            )
+
+    return {"error": f"Unknown harness tool: {name}"}
+
+
+async def run_harness_agent_turn(
+    *,
+    messages: list[dict[str, str]],
+    confirmed_action_ids: list[str] | None = None,
+    tool_runner: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None,
+) -> dict[str, Any]:
+    user_message = last_user_message(messages)
+    mode = classify_intent(user_message)
+    runner = tool_runner or default_tool_runner
+    tool_calls: list[dict[str, Any]] = []
+    proposed_actions: list[dict[str, Any]] = []
+    next_steps: list[str] = []
+
+    async def call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
+        payload = args or {}
+        result = await runner(name, payload)
+        tool_calls.append({"tool": name, "args": payload, "result": result})
+        return result
+
+    if mode == "career_exploration":
+        profile = await call_tool("get_profile", {})
+        exploration = build_career_exploration_fallback(
+            profile=profile if isinstance(profile, dict) else {},
+            user_message=user_message,
+        )
+        return {
+            "assistant_message": (
+                "我先基于你的档案做了一版可迁移职业路径探索。"
+                "这些方向强调能力迁移，下一步可以把其中 1-2 条转成岗位搜索。"
+            ),
+            "mode": mode,
+            "requires_confirmation": False,
+            "tool_calls": tool_calls,
+            "proposed_actions": [],
+            "career_paths": exploration["career_paths"],
+            "transferable_skills_summary": exploration["transferable_skills_summary"],
+            "quick_wins": exploration["quick_wins"],
+            "reality_check": exploration["reality_check"],
+            "job_cards": [],
+            "next_steps": exploration["quick_wins"],
+        }
+
+    if mode == "job_workflow":
+        await call_tool("get_profile", {})
+        jobs_result = await call_tool("list_jobs", {"page": 1, "page_size": 8})
+        raw_jobs = []
+        if isinstance(jobs_result, dict):
+            raw_jobs = jobs_result.get("jobs") or jobs_result.get("items") or []
+        job_cards = [build_job_card(item) for item in raw_jobs if isinstance(item, dict)]
+        if job_cards:
+            job_ids = [card["id"] for card in job_cards[:5] if card["id"]]
+            proposed_actions.append(
+                plan_action(
+                    "batch_triage",
+                    {"job_ids": job_ids, "status": "screened"},
+                    index=1,
+                )
+            )
+            next_steps = [
+                "Review the suggested job cards.",
+                "Confirm the batch triage action if these roles look relevant.",
+                "Ask me to generate tailored resumes for the strongest matches.",
+            ]
+        else:
+            proposed_actions.append(
+                plan_action(
+                    "run_scraper",
+                    {"source": "shixiseng", "keywords": ["校招", "实习"], "location": "", "max_results": 30},
+                    index=1,
+                )
+            )
+            next_steps = [
+                "Confirm a scraper run to collect fresh jobs.",
+                "After jobs arrive, ask me to rank them against your profile.",
+            ]
+        execution = await execute_planned_actions(
+            proposed_actions,
+            confirmed_action_ids=confirmed_action_ids,
+        )
+        tool_calls.extend(execution["tool_calls"])
+        blocked_actions = execution["blocked_actions"]
+        return {
+            "assistant_message": "我检查了岗位库，并准备好了下一步动作。批量动作会等你确认后再执行。",
+            "mode": mode,
+            "requires_confirmation": bool(blocked_actions),
+            "tool_calls": tool_calls,
+            "proposed_actions": blocked_actions,
+            "career_paths": [],
+            "job_cards": job_cards,
+            "next_steps": next_steps,
+        }
+
+    if mode == "follow_up":
+        notifications = await call_tool("list_email_notifications", {})
+        events = await call_tool("list_calendar_events", {})
+        notification_count = len(notifications) if isinstance(notifications, list) else 0
+        event_count = len(events) if isinstance(events, list) else 0
+        return {
+            "assistant_message": f"我看了邮件通知和日程：当前有 {notification_count} 条通知、{event_count} 个日程事件。",
+            "mode": mode,
+            "requires_confirmation": False,
+            "tool_calls": tool_calls,
+            "proposed_actions": [],
+            "career_paths": [],
+            "job_cards": [],
+            "next_steps": ["Review upcoming interviews.", "Ask me to generate answers for high-frequency questions."],
+        }
+
+    return {
+        "assistant_message": "我可以帮你做职业探索、岗位筛选、简历生成、投递管理和面试跟进。你可以直接告诉我目标。",
+        "mode": mode,
+        "requires_confirmation": False,
+        "tool_calls": tool_calls,
+        "proposed_actions": [],
+        "career_paths": [],
+        "job_cards": [],
+        "next_steps": [
+            "Ask for unexpected career paths.",
+            "Ask me to find suitable jobs.",
+            "Ask me to prepare resumes or application tracking.",
+        ],
     }
 
 
