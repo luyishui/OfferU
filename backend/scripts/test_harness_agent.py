@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 
@@ -9,7 +10,9 @@ sys.path.insert(0, str(ROOT))
 from app.services.harness_agent import (  # noqa: E402
     build_career_exploration_fallback,
     classify_intent,
+    execute_planned_actions,
     get_default_tool_registry,
+    plan_action,
 )
 
 
@@ -59,9 +62,51 @@ def test_career_fallback_shape_has_paths_and_next_steps() -> None:
     assert payload["reality_check"]["timeline"]
 
 
+def test_confirm_actions_block_batch_writes() -> None:
+    action = plan_action("batch_triage", {"job_ids": [1, 2], "status": "screened"})
+    assert action["risk_level"] == "confirm"
+    assert action["requires_confirmation"] is True
+    assert action["id"] == "batch_triage:1"
+
+
+def test_confirmed_action_ids_execute_only_matching() -> None:
+    calls: list[dict] = []
+
+    async def fake_handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "kwargs": kwargs}
+
+    registry = {
+        "batch_triage": {
+            "name": "batch_triage",
+            "risk_level": "confirm",
+            "handler": fake_handler,
+            "description": "Batch triage jobs",
+            "parameters": {},
+        }
+    }
+    planned = [
+        plan_action("batch_triage", {"job_ids": [1], "status": "screened"}),
+        plan_action("batch_triage", {"job_ids": [2], "status": "ignored"}, index=2),
+    ]
+
+    result = asyncio.run(
+        execute_planned_actions(
+            planned,
+            registry=registry,
+            confirmed_action_ids=["batch_triage:2"],
+        )
+    )
+
+    assert len(result["tool_calls"]) == 1
+    assert calls == [{"job_ids": [2], "status": "ignored"}]
+
+
 if __name__ == "__main__":
     test_registry_declares_risk_levels()
     test_classify_career_exploration_prompt()
     test_classify_job_workflow_prompt()
     test_career_fallback_shape_has_paths_and_next_steps()
+    test_confirm_actions_block_batch_writes()
+    test_confirmed_action_ids_execute_only_matching()
     print("harness agent core tests passed")

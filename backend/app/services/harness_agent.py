@@ -214,3 +214,79 @@ def build_career_exploration_fallback(
             "note": f"Prompt signal: {user_message[:120]}",
         },
     }
+
+
+def build_action_summary(tool_name: str, args: dict[str, Any]) -> str:
+    if tool_name == "batch_triage":
+        count = len(args.get("job_ids") or [])
+        return f"Update {count} jobs to {args.get('status', 'selected status')}."
+    if tool_name == "import_jobs_to_application_table":
+        count = len(args.get("job_ids") or [])
+        return f"Import {count} jobs into application tracking."
+    if tool_name == "run_scraper":
+        keywords = ", ".join(str(item) for item in (args.get("keywords") or []))
+        source = args.get("source") or "selected source"
+        return f"Run {source} scraper for {keywords or 'configured keywords'}."
+    if tool_name == "generate_resume":
+        return f"Generate tailored resume for job #{args.get('job_id', '')}."
+    if tool_name == "auto_fill_calendar":
+        return "Create calendar events from parsed interview notifications."
+    if tool_name == "sync_email_notifications":
+        return "Sync email notifications and parse interview-related messages."
+    return f"Run {tool_name.replace('_', ' ')}."
+
+
+def plan_action(tool_name: str, args: dict[str, Any], index: int = 1) -> dict[str, Any]:
+    registry = get_default_tool_registry()
+    risk_level = registry.get(tool_name, {}).get("risk_level", "confirm")
+    return {
+        "id": f"{tool_name}:{index}",
+        "tool": tool_name,
+        "args": args,
+        "risk_level": risk_level,
+        "requires_confirmation": risk_level == "confirm",
+        "summary": build_action_summary(tool_name, args),
+    }
+
+
+async def execute_planned_actions(
+    planned_actions: list[dict[str, Any]],
+    *,
+    registry: dict[str, dict[str, Any]] | None = None,
+    confirmed_action_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    registry = registry or get_default_tool_registry()
+    confirmed = set(confirmed_action_ids or [])
+    tool_calls: list[dict[str, Any]] = []
+    blocked_actions: list[dict[str, Any]] = []
+
+    for action in planned_actions:
+        action_id = str(action.get("id") or "")
+        tool_name = str(action.get("tool") or "")
+        risk_level = str(action.get("risk_level") or "confirm")
+        args = action.get("args") if isinstance(action.get("args"), dict) else {}
+
+        if risk_level == "confirm" and action_id not in confirmed:
+            blocked_actions.append(action)
+            continue
+
+        entry = registry.get(tool_name) or {}
+        handler = entry.get("handler")
+        if handler is None:
+            result = {"error": f"Tool {tool_name} has no handler"}
+        else:
+            clean_args = {k: v for k, v in args.items() if v is not None}
+            result = await handler(**clean_args)
+        tool_calls.append(
+            {
+                "tool": tool_name,
+                "args": args,
+                "result": result,
+                "action_id": action_id,
+            }
+        )
+
+    return {
+        "tool_calls": tool_calls,
+        "blocked_actions": blocked_actions,
+    }
