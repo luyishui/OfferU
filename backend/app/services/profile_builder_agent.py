@@ -309,19 +309,19 @@ def build_next_question(missing_fields: list[str], target_role: str = "") -> str
     first = missing_fields[0] if missing_fields else ""
     role_hint = f"为了更贴近「{target_role}」方向，" if target_role else ""
     if first == "target_role":
-        return "你这次最想找什么岗位方向？可以说一个大概，比如 AI 产品经理、增长运营、后端开发。"
+        return "你这次最想找什么岗位方向？先说一个大概就行，比如 AI 产品经理、增长运营、后端开发；如果还不确定，也可以说你更喜欢分析、表达、组织还是做产品。"
     if first == "target_city":
         return "你主要想投哪些城市？如果可以远程或多城市，也可以一起告诉我。"
     if first == "resume":
-        return "你可以上传现有简历，或者先把最核心的 2-3 段经历粘给我。"
+        return "你可以上传现有简历，或者先把最核心的 2-3 段经历粘给我。每段不用完整，写清「做了什么 + 结果」就够。"
     if first == "contact_info":
         return "档案里还缺联系方式，你方便补充手机号或邮箱吗？"
     if first == "core_experience":
-        return f"{role_hint}你最能代表自己的一个项目或工作经历是什么？说背景、你负责什么、结果如何就行。"
+        return f"{role_hint}你可以任选一段最像样的经历，用「背景-动作-结果」说三句：当时要解决什么问题、你具体负责什么、最后有什么结果。"
     if first == "impact_metrics":
-        return f"{role_hint}刚才这些经历里，有没有能量化的结果？比如增长比例、节省时间、覆盖人数、收入、排名。"
+        return f"{role_hint}刚才这些经历里，有没有任何能作为 proof point 的数字？比如人数、金额、增长比例、节省时间、覆盖范围、排名；不确定也可以估一个范围，并说明是估计。"
     if first == "skills":
-        return f"{role_hint}你希望简历突出哪些技能、工具或业务关键词？"
+        return f"{role_hint}你希望简历突出哪些技能、工具或业务关键词？可以按「工具 / 方法 / 行业词」各说几个。"
     return "我已经有一版档案素材了。你还想补充哪段经历，或者要我先写入档案？"
 
 
@@ -367,11 +367,17 @@ def build_initial_agent_state(
 
 def build_profile_agent_system_prompt(state: dict[str, Any]) -> str:
     missing_labels = "、".join(state.get("missing_field_labels") or []) or "暂无明显缺口"
-    return f"""你是 OfferU 的 AI 建档助手，目标是通过受控 agent loop 帮用户把求职 Profile 建好。
+    return f"""你是 OfferU 的 AI 建档助手，也是一位求职职业教练。目标是通过受控 agent loop 帮用户把求职 Profile 建成可复用的单一事实源。
 
 你可以自主追问，但每轮只能做一个清晰动作。你不能直接写库，只能提出 profile patch，等用户确认后由系统写入。
 
 当前缺口：{missing_labels}
+
+工作方法：
+- 先建立 Career Ops 风格的单一事实源：基础身份、目标岗位、career story、proof points、求职偏好、避雷项。
+- 不要急着提取条目。如果用户只给了很短素材，先判断它是否足够写进简历；不够时只问一个最关键追问。
+- 追问优先级：目标岗位 -> 关键经历 -> STAR 背景/任务/动作/结果 -> proof points 数字/作品/反馈 -> 技能关键词 -> 偏好与限制。
+- 用户不知道怎么说时，给 2-3 个可选回答角度，而不是只说“继续补充经历”。
 
 你必须输出严格 JSON，不要输出 Markdown：
 {{
@@ -395,4 +401,4 @@ def build_profile_agent_system_prompt(state: dict[str, Any]) -> str:
 2. 如果用户给了可入库事实，action 用 propose_patch，并把事实放进 sections 或 base_info。
 3. 如果信息不足，action 用 ask_user，只问一个最关键的问题。
 4. 所有数字必须来自简历或用户消息。
-5. 目标是社招简历建档，要围绕目标岗位追问项目职责、成果数据、技能关键词和求职偏好。"""
+5. 目标是能生成拿得出手的简历和投递材料，要围绕目标岗位追问项目职责、成果数据、技能关键词、作品证据和求职偏好。"""

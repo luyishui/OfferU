@@ -18,6 +18,7 @@ import {
 import { useSWRConfig } from "swr";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
 import { profileApi, type ProfileAgentPatch } from "@/lib/api";
+import { useDraggableDock } from "./useDraggableDock";
 
 interface AgentMessage {
   id: string;
@@ -68,6 +69,8 @@ export function ProfileAgentDock() {
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState("");
+  const { dockRef, dockStyle, dragHandleProps, launcherDragHandleProps, consumeDragClick } =
+    useDraggableDock<HTMLDivElement>({ width: 460, height: 720 });
 
   const canStart = useMemo(
     () => Boolean(file || resumeText.trim() || targetRole.trim() || jobGoal.trim()),
@@ -183,10 +186,14 @@ export function ProfileAgentDock() {
   };
 
   return (
-    <div className="fixed bottom-5 right-5 z-[80] flex flex-col items-end gap-3">
+    <div
+      ref={dockRef}
+      style={dockStyle}
+      className="fixed bottom-5 right-5 z-[80] flex flex-col items-end gap-3"
+    >
       {open && (
         <section className="bauhaus-panel flex h-[min(82dvh,720px)] w-[min(460px,calc(100vw-2rem))] flex-col overflow-hidden bg-white">
-          <header className="border-b border-black/10 p-4">
+          <header {...dragHandleProps} className="cursor-move select-none border-b border-black/10 p-4 touch-none">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="bauhaus-panel-sm flex h-12 w-12 shrink-0 items-center justify-center bg-[#F0C020] text-black">
@@ -413,8 +420,12 @@ export function ProfileAgentDock() {
       <Button
         isIconOnly
         aria-label="打开 AI 求职助手"
-        className="h-14 w-14 border-2 border-black bg-[#F0C020] text-black shadow-[3px_3px_0_0_rgba(18,18,18,0.25)]"
-        onPress={() => setOpen((prev) => !prev)}
+        {...launcherDragHandleProps}
+        className="h-14 w-14 cursor-move touch-none border-2 border-black bg-[#F0C020] text-black shadow-[3px_3px_0_0_rgba(18,18,18,0.25)]"
+        onPress={() => {
+          if (consumeDragClick()) return;
+          setOpen((prev) => !prev);
+        }}
       >
         {open ? <X size={22} /> : <Bot size={24} />}
       </Button>

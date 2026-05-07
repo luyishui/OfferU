@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import {
   useResume, updateResume, updateSection, createSection,
-  deleteSection, uploadResumePhoto, useConfig,
+  deleteSection, uploadResumePhoto, uploadResumeLogo, resolveResumeLogo, useConfig,
   aiOptimizeResume, aiApplySuggestion,
   AiSuggestion, AiOptimizeResult,
   useResumeTemplates, applyTemplate,
@@ -44,6 +44,7 @@ import {
 import { jobsApi, resumeApi } from "@/lib/api";
 import SectionEditor, { createEmptySectionItem } from "../components/SectionEditor";
 import ResumePreview from "../components/ResumePreview";
+import MatchScorePanel from "../components/MatchScorePanel";
 import StyleToolbar, { DEFAULT_STYLE_CONFIG, MIN_STYLE_CONFIG } from "../components/StyleToolbar";
 import RichTextEditor from "../components/RichTextEditor";
 import { useHistory } from "../hooks/useHistory";
@@ -165,6 +166,8 @@ export default function ResumeEditorPage() {
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [logoResolving, setLogoResolving] = useState(false);
+  const [logoError, setLogoError] = useState("");
   const initializedRef = useRef(false);
   const [fitting, setFitting] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<number>>(new Set());
@@ -270,6 +273,8 @@ export default function ResumeEditorPage() {
   const [aiJobKeyword, setAiJobKeyword] = useState("");
   const [aiJobs, setAiJobs] = useState<Job[]>([]);
   const [aiJobsLoading, setAiJobsLoading] = useState(false);
+  const keywordMatch = aiResult?.keyword_match;
+  const highlightedKeywords = keywordMatch?.matched || [];
   const { data: pickedPools } = usePools("picked");
   const [deleteSectionTarget, setDeleteSectionTarget] = useState<{ id: number; title: string } | null>(null);
   const [deletingSection, setDeletingSection] = useState(false);
@@ -570,6 +575,13 @@ export default function ResumeEditorPage() {
   /** 更新联系方式单个字段 */
   const updateContact = (key: string, value: string) => {
     setContactJson((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resolveAssetUrl = (url?: string) => {
+    if (!url) return "";
+    return url.startsWith("/")
+      ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${url}`
+      : url;
   };
 
   /** 保存简历主信息到后端 */
@@ -938,9 +950,56 @@ export default function ResumeEditorPage() {
     if (res?.photo_url) {
       setPhotoUrl(res.photo_url);
     }
+    e.target.value = "";
   };
 
   /** 导出 PDF — 使用后端 WeasyPrint/ReportLab 兜底链路 */
+  /** 上传大学校徽 */
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const res = await uploadResumeLogo(resumeId, file);
+    const logoUrl = res?.schoolLogoUrl || res?.logo_url;
+    if (logoUrl) {
+      updateContact("schoolLogoUrl", logoUrl);
+    }
+    e.target.value = "";
+  };
+
+  const handleResolveLogo = async () => {
+    const schoolName = (contactJson.schoolName || "").trim();
+    if (!schoolName) {
+      setLogoError("先输入学校名称");
+      return;
+    }
+    setLogoResolving(true);
+    setLogoError("");
+    try {
+      const res = await resolveResumeLogo(resumeId, schoolName);
+      const logoUrl = res?.schoolLogoUrl || res?.logo_url;
+      if (logoUrl) {
+        setContactJson((prev) => ({
+          ...prev,
+          schoolName,
+          schoolLogoUrl: logoUrl,
+          schoolLogoSource: res?.source || "",
+        }));
+      }
+    } catch (err: any) {
+      setLogoError(err?.message || "未找到对应校徽");
+    } finally {
+      setLogoResolving(false);
+    }
+  };
+
+  const handleRemoveLogo = () => {
+    setContactJson((prev) => ({
+      ...prev,
+      schoolLogoUrl: "",
+      schoolLogoSource: "",
+    }));
+  };
+
   const handleExportPdf = async () => {
     setExporting(true);
     setExportError("");
@@ -1239,6 +1298,65 @@ export default function ResumeEditorPage() {
 
               {/* 联系信息网格 — 更宽松的间距 */}
               <div className="space-y-2.5">
+                <div className="bauhaus-panel-sm space-y-3 bg-[#F0F0F0] p-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-14 w-24 items-center justify-center border-2 border-black bg-white">
+                      {contactJson.schoolLogoUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={resolveAssetUrl(contactJson.schoolLogoUrl)} alt="大学校徽" className="max-h-12 max-w-[88px] object-contain" />
+                      ) : (
+                        <ImageIcon size={18} className="text-black/35" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap gap-2">
+                        <label className="cursor-pointer">
+                          <Button size="sm" variant="light" as="span" className="bauhaus-button bauhaus-button-outline !px-3 !py-2 !text-[11px]">
+                            {contactJson.schoolLogoUrl ? "更换校徽" : "上传校徽"}
+                          </Button>
+                          <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleLogoUpload} />
+                        </label>
+                        {contactJson.schoolLogoUrl && (
+                          <Button size="sm" variant="light" onPress={handleRemoveLogo} className="bauhaus-button bauhaus-button-outline !px-3 !py-2 !text-[11px]">
+                            移除校徽
+                          </Button>
+                        )}
+                      </div>
+                      <p className="mt-1 text-[10px] font-medium text-black/35">显示在附件同款模板右上角</p>
+                    </div>
+                  </div>
+                  <Input
+                    label="学校名称"
+                    variant="bordered"
+                    size="sm"
+                    value={contactJson.schoolName || ""}
+                    onValueChange={(v) => updateContact("schoolName", v)}
+                    placeholder="例如：华南师范大学"
+                    classNames={bauhausFieldClassNames}
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="light"
+                      onPress={handleResolveLogo}
+                      isLoading={logoResolving}
+                      className="bauhaus-button bauhaus-button-outline !px-3 !py-2 !text-[11px]"
+                    >
+                      自动获取校徽
+                    </Button>
+                    <Input
+                      label="校徽链接"
+                      variant="bordered"
+                      size="sm"
+                      value={contactJson.schoolLogoUrl || ""}
+                      onValueChange={(v) => updateContact("schoolLogoUrl", v)}
+                      placeholder="自动获取后填入，也可手动粘贴"
+                      className="min-w-[220px] flex-1"
+                      classNames={bauhausFieldClassNames}
+                    />
+                  </div>
+                  {logoError && <p className="text-[11px] font-semibold text-[#D02020]">{logoError}</p>}
+                </div>
                 <Input label="姓名" variant="bordered" size="sm" value={userName} onValueChange={setUserName} classNames={bauhausFieldClassNames} />
                 <div className="grid grid-cols-2 gap-2.5">
                   <Input label="电话" variant="bordered" size="sm" value={contactJson.phone || ""} onValueChange={(v) => updateContact("phone", v)} classNames={bauhausFieldClassNames} />
@@ -1430,10 +1548,17 @@ export default function ResumeEditorPage() {
 
         {/* ---- 右侧 A4 预览画布（居中展示，深色画布背景） ---- */}
         <div className={`flex flex-1 items-start justify-center overflow-auto bg-[#EFEDE6] p-8 transition-all [background-image:radial-gradient(#121212_1.2px,transparent_1.2px)] [background-size:26px_26px] ${aiResult ? "mr-[380px]" : ""}`}>
-          <div className="bauhaus-panel sticky top-0 bg-white p-4 md:p-5">
+          <div className="sticky top-0 flex flex-col gap-4">
+            <MatchScorePanel
+              score={keywordMatch?.score}
+              matched={keywordMatch?.matched}
+              missing={keywordMatch?.missing}
+            />
+            <div className="bauhaus-panel bg-white p-4 md:p-5">
             <ResumePreview
               ref={previewRef}
               userName={userName}
+              title={title}
               photoUrl={
                 photoUrl.startsWith("/")
                   ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${photoUrl}`
@@ -1443,7 +1568,9 @@ export default function ResumeEditorPage() {
               contactJson={contactJson}
               sections={sections}
               styleConfig={styleConfig}
+              highlightKeywords={highlightedKeywords}
             />
+            </div>
           </div>
         </div>
 

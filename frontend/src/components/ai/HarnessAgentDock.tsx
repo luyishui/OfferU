@@ -28,6 +28,7 @@ import {
   type HarnessAgentResponse,
 } from "@/lib/api";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
+import { useDraggableDock } from "./useDraggableDock";
 
 interface DockMessage {
   id: string;
@@ -77,13 +78,17 @@ export function HarnessAgentDock() {
     {
       id: "welcome",
       role: "assistant",
-      content: "我是 OfferU Harness Agent，可以帮你串起档案、岗位、简历、投递和面试推进。",
+      content: "我是 OfferU 全局助手，可以帮你串起档案、岗位、简历、投递和面试推进。",
     },
   ]);
   const [input, setInput] = useState("");
   const [pendingActions, setPendingActions] = useState<HarnessAgentProposedAction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const { dockRef, dockStyle, dragHandleProps, launcherDragHandleProps, consumeDragClick } = useDraggableDock({
+    width: 440,
+    height: 560,
+  });
 
   const hasPendingActions = pendingActions.length > 0;
 
@@ -139,10 +144,15 @@ export function HarnessAgentDock() {
     return (
       <Button
         isIconOnly
-        aria-label="打开 OfferU Harness Agent"
-        title="打开 OfferU Harness Agent"
-        onPress={() => setOpen(true)}
-        className="fixed bottom-24 right-5 z-50 h-14 w-14 border-2 border-black bg-[#F0C020] text-black shadow-[4px_4px_0_0_rgba(18,18,18,0.35)] md:bottom-6"
+        aria-label="打开 OfferU 全局助手"
+        title="打开 OfferU 全局助手"
+        {...launcherDragHandleProps}
+        onPress={() => {
+          if (consumeDragClick()) return;
+          setOpen(true);
+        }}
+        style={dockStyle}
+        className="fixed bottom-24 right-5 z-50 h-14 w-14 cursor-move touch-none border-2 border-black bg-[#F0C020] text-black shadow-[4px_4px_0_0_rgba(18,18,18,0.35)] md:bottom-6"
       >
         <Bot size={22} />
       </Button>
@@ -150,8 +160,15 @@ export function HarnessAgentDock() {
   }
 
   return (
-    <section className="fixed bottom-24 right-4 z-50 flex max-h-[78vh] w-[min(92vw,440px)] flex-col overflow-hidden border-2 border-black bg-white shadow-[6px_6px_0_0_rgba(18,18,18,0.35)] md:bottom-6 md:right-6">
-      <header className="flex items-center justify-between border-b-2 border-black bg-[var(--surface-muted)] px-4 py-3">
+    <section
+      ref={dockRef}
+      style={dockStyle}
+      className="fixed bottom-24 right-4 z-50 flex max-h-[78vh] w-[min(92vw,440px)] flex-col overflow-hidden border-2 border-black bg-white shadow-[6px_6px_0_0_rgba(18,18,18,0.35)] md:bottom-6 md:right-6"
+    >
+      <header
+        {...dragHandleProps}
+        className="flex cursor-move select-none items-center justify-between border-b-2 border-black bg-[var(--surface-muted)] px-4 py-3 touch-none"
+      >
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center border-2 border-black bg-[#F0C020] text-black">
             <Sparkles size={17} />

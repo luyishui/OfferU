@@ -35,6 +35,7 @@ import re
 import uuid
 from io import BytesIO
 from typing import Optional, Any
+from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
@@ -43,6 +44,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 import anyio
+import httpx
 from pydantic import BaseModel, Field
 from jinja2 import Template
 from sse_starlette import EventSourceResponse, ServerSentEvent
@@ -53,6 +55,7 @@ from app.services.application_workspace import auto_write_job_to_total
 
 router = APIRouter()
 
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 _EXPORT_IMAGE_CACHE_TTL_SECONDS = 120
 _EXPORT_IMAGE_CACHE_MAX_ENTRIES = 8
 _export_image_cache: dict[tuple[int, str, str], tuple[float, bytes]] = {}
@@ -122,6 +125,11 @@ class ReorderItem(BaseModel):
 class SectionReorder(BaseModel):
     """段落排序请求体"""
     items: list[ReorderItem]
+
+
+class LogoResolveRequest(BaseModel):
+    """Resolve a university logo from an online source."""
+    school_name: str = Field(..., min_length=1, max_length=120)
 
 
 # =============================================
@@ -521,6 +529,117 @@ UPLOAD_DIR = os.path.join(
     "uploads", "photos",
 )
 
+LOGO_UPLOAD_DIR = os.path.join(
+    BACKEND_DIR,
+    "uploads", "logos",
+)
+
+
+def _image_extension(content_type: str | None) -> str:
+    ext_by_type = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }
+    if content_type not in ext_by_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {content_type}",
+        )
+    return ext_by_type[content_type]
+
+
+async def _read_upload_image(file: UploadFile, *, max_bytes: int = 5 * 1024 * 1024) -> tuple[bytes, str]:
+    ext = _image_extension(file.content_type)
+    contents = await file.read()
+    if len(contents) > max_bytes:
+        raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+    return contents, ext
+
+
+def _commons_file_url(filename: str) -> str:
+    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{quote(filename)}"
+
+
+async def _resolve_university_logo_url(school_name: str) -> dict[str, str]:
+    name = school_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="School name is required")
+
+    headers = {"User-Agent": "OfferU/0.1 university-logo-resolver"}
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
+        wiki_response = await client.get(
+            "https://zh.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": name,
+                "gsrlimit": 5,
+                "prop": "pageimages|pageprops",
+                "piprop": "original",
+                "format": "json",
+            },
+        )
+        wiki_response.raise_for_status()
+        pages = (wiki_response.json().get("query") or {}).get("pages") or {}
+        sorted_pages = sorted(pages.values(), key=lambda page: page.get("index", 999))
+        for page in sorted_pages:
+            title = str(page.get("title") or "")
+            if "大学" not in title and "学院" not in title and name not in title:
+                continue
+            page_image = (page.get("pageprops") or {}).get("page_image")
+            if page_image:
+                return {
+                    "logo_url": _commons_file_url(page_image),
+                    "school_name": name,
+                    "source": "zh.wikipedia.page_image",
+                    "matched_title": title,
+                }
+            original = page.get("original") or {}
+            if original.get("source"):
+                return {
+                    "logo_url": original["source"],
+                    "school_name": name,
+                    "source": "zh.wikipedia.original",
+                    "matched_title": title,
+                }
+
+        wikidata_response = await client.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbsearchentities",
+                "search": name,
+                "language": "zh",
+                "format": "json",
+                "limit": 5,
+            },
+        )
+        wikidata_response.raise_for_status()
+        for item in wikidata_response.json().get("search", []):
+            description = str(item.get("description") or "").lower()
+            label = str(item.get("label") or "")
+            if "university" not in description and "大学" not in label and "学院" not in label:
+                continue
+            entity_id = item.get("id")
+            if not entity_id:
+                continue
+            entity_response = await client.get(f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json")
+            entity_response.raise_for_status()
+            entity = entity_response.json().get("entities", {}).get(entity_id, {})
+            claims = entity.get("claims", {})
+            for prop in ("P154", "P18"):
+                for claim in claims.get(prop, []):
+                    value = (((claim or {}).get("mainsnak") or {}).get("datavalue") or {}).get("value")
+                    if isinstance(value, str) and value:
+                        return {
+                            "logo_url": _commons_file_url(value),
+                            "school_name": name,
+                            "source": f"wikidata.{prop}",
+                            "matched_title": label,
+                        }
+
+    raise HTTPException(status_code=404, detail=f"Logo not found for school: {name}")
+
 
 @router.post("/{resume_id}/photo")
 async def upload_photo(
@@ -567,6 +686,59 @@ async def upload_photo(
     await db.commit()
 
     return {"photo_url": photo_url}
+
+
+@router.post("/{resume_id}/logo")
+async def upload_logo(
+    resume_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload a university logo and store its relative URL in contact_json.schoolLogoUrl.
+    """
+    resume = await _get_resume_or_404(resume_id, db)
+    contents, ext = await _read_upload_image(file)
+
+    os.makedirs(LOGO_UPLOAD_DIR, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.join(LOGO_UPLOAD_DIR, filename)
+
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    logo_url = f"/uploads/logos/{filename}"
+    contact_json = dict(resume.contact_json or {})
+    contact_json["schoolLogoUrl"] = logo_url
+    resume.contact_json = contact_json
+    await db.commit()
+
+    return {"logo_url": logo_url, "schoolLogoUrl": logo_url}
+
+
+@router.post("/{resume_id}/logo/resolve")
+async def resolve_logo(
+    resume_id: int,
+    payload: LogoResolveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Resolve a university logo by school name and store it in contact_json.schoolLogoUrl.
+    """
+    resume = await _get_resume_or_404(resume_id, db)
+    resolved = await _resolve_university_logo_url(payload.school_name)
+
+    contact_json = dict(resume.contact_json or {})
+    contact_json["schoolName"] = payload.school_name.strip()
+    contact_json["schoolLogoUrl"] = resolved["logo_url"]
+    contact_json["schoolLogoSource"] = resolved["source"]
+    resume.contact_json = contact_json
+    await db.commit()
+
+    return {
+        **resolved,
+        "schoolLogoUrl": resolved["logo_url"],
+    }
 
 
 # =============================================
@@ -1200,6 +1372,35 @@ def _can_try_weasyprint() -> bool:
     return bool(ctypes.util.find_library("libgobject-2.0-0"))
 
 
+async def _render_resume_pdf_with_playwright(resume_id: int, resume: Resume) -> bytes:
+    """
+    Render the dedicated frontend print route so PDF output matches the React preview.
+    Falls back to the legacy HTML renderer when Playwright or Chromium is unavailable.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as exc:
+        raise RuntimeError(f"Playwright is not installed: {exc}") from exc
+
+    print_url = f"{FRONTEND_BASE_URL}/resume/print/{resume_id}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        try:
+            page = await browser.new_page(viewport={"width": 1240, "height": 1754}, device_scale_factor=1)
+            await page.goto(print_url, wait_until="networkidle", timeout=30000)
+            await page.wait_for_selector(".resume-print .resume-body", timeout=15000)
+            await page.emulate_media(media="print")
+            await page.evaluate("document.fonts && document.fonts.ready")
+            return await page.pdf(
+                format="A4",
+                print_background=True,
+                prefer_css_page_size=True,
+                margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+            )
+        finally:
+            await browser.close()
+
+
 def _render_resume_pdf_bytes(html_str: str) -> bytes:
     weasy_error: Exception | None = None
 
@@ -1279,8 +1480,11 @@ async def export_pdf(resume_id: int, db: AsyncSession = Depends(get_db)):
     4. StreamingResponse 返回
     """
     resume = await _get_resume_or_404(resume_id, db, load_sections=True)
-    html_str = await _render_resume_html_for_export(resume, db)
-    pdf_bytes = await anyio.to_thread.run_sync(_render_resume_pdf_bytes, html_str)
+    try:
+        pdf_bytes = await _render_resume_pdf_with_playwright(resume_id, resume)
+    except Exception:
+        html_str = await _render_resume_html_for_export(resume, db)
+        pdf_bytes = await anyio.to_thread.run_sync(_render_resume_pdf_bytes, html_str)
 
     return StreamingResponse(
         BytesIO(pdf_bytes),

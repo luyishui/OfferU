@@ -301,24 +301,39 @@ def _fallback_chat_payload(topic: str, user_message: str) -> dict[str, Any]:
         normalized_topic = "custom"
 
     return {
-        "assistant_message": "我先帮你整理出一条可确认的档案条目，你可以直接编辑后确认入库。",
+        "assistant_message": (
+            "这段已经能成为可写进简历的素材，我先帮你留一条候选。"
+            "如果要写得更像样，还差几个 proof points：金额、人数/规模、你具体做的动作、最后结果。"
+            "你记得哪个先补哪个。"
+        ),
         "bullet_candidates": [
             {
                 "section_type": normalized_topic,
                 "title": "待确认经历条目",
                 "content_json": {"bullet": user_message.strip()},
-                "confidence": 0.6,
+                "confidence": 0.55,
             }
         ],
         "topic_complete": False,
     }
 
 
-async def _generate_chat_payload(topic: str, user_message: str) -> dict[str, Any]:
-    prompt = (
-        "你是求职档案构建助手。根据用户输入提取结构化事实，输出严格JSON（不要输出其他文字）。\n"
+def _build_profile_chat_prompt(topic: str) -> str:
+    topic_label = {
+        "education": "教育经历",
+        "experience": "实习/工作经历",
+        "project": "项目经历",
+        "activity": "校园/社团/比赛经历",
+        "skill": "技能与证书",
+        "general": "综合档案",
+    }.get(topic, "综合档案")
+
+    return (
+        f"你是 OfferU 的求职档案构建助手，也是一位职业教练。当前主题：{topic_label}。\n"
+        "你的目标不是让用户机械填写表单，而是把随口说出的经历转成可复用的简历事实源。\n"
+        "如果信息不够，不要硬写漂亮话；只问一个最关键追问，帮助用户补齐背景-动作-结果和 proof points。\n"
         "JSON 格式:\n"
-        '{"assistant_message": "对用户的回复，可追问细节或鼓励补充",\n'
+        '{"assistant_message": "对用户的回复。先肯定素材价值，再指出还缺什么；如果足够，则说明已整理候选条目",\n'
         ' "bullet_candidates": [\n'
         '   {"section_type": "education|experience|project|skill|certificate",\n'
         '    "title": "条目标题",\n'
@@ -333,12 +348,16 @@ async def _generate_chat_payload(topic: str, user_message: str) -> dict[str, Any
         "skill: {\"category\":技能分类, \"items\":[技能1,技能2,...], \"bullet\":逗号分隔技能}\n"
         "certificate: {\"name\":证书名, \"issuer\":颁发机构, \"date\":日期, \"bullet\":一行摘要}\n\n"
         "## 核心规则：\n"
-        "1. 严禁编造事实，所有数字必须来自用户原文\n"
-        "2. description 中必须保留用户提到的所有量化数据（人数、金额、时长、排名等）\n"
-        "3. bullet 是一行浓缩摘要，格式：关键词1 | 关键词2 | 量化成果\n"
-        "4. 候选条目 1-3 条，confidence: 1.0=用户明确说了, 0.7=推断, 0.5以下=需确认\n"
-        "5. 如果用户信息不够，assistant_message 中友好追问具体数据"
+        "1. 严禁编造事实，所有数字必须来自用户原文。\n"
+        "2. description 中必须保留用户提到的所有量化数据：人数、金额、时长、排名、覆盖范围、增长/下降比例。\n"
+        "3. bullet 是一行浓缩摘要，格式：关键词1 | 关键词2 | 量化成果。\n"
+        "4. 候选条目 1-3 条，confidence: 1.0=用户明确说了, 0.7=可直接确认, 0.5以下=需继续追问。\n"
+        "5. 如果用户只说了短句，也要给出可回答的下一问，例如：你联系了多少人、拉到多少钱、活动规模多大、最后结果如何。\n"
     )
+
+
+async def _generate_chat_payload(topic: str, user_message: str) -> dict[str, Any]:
+    prompt = _build_profile_chat_prompt(topic)
 
     try:
         llm_result = await chat_completion(

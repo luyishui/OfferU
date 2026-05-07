@@ -1043,6 +1043,31 @@ export async function uploadResumePhoto(resumeId: number, file: File) {
   return res.json();
 }
 
+/** 上传大学校徽 */
+export async function uploadResumeLogo(resumeId: number, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/logo`, {
+    method: "POST",
+    body: formData,
+  });
+  return res.json();
+}
+
+/** 根据学校名称联网获取大学校徽 */
+export async function resolveResumeLogo(resumeId: number, schoolName: string) {
+  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/logo/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ school_name: schoolName }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Logo resolve failed with ${res.status}`);
+  }
+  return res.json();
+}
+
 export interface ResumeTemplate {
   id: number;
   name: string;

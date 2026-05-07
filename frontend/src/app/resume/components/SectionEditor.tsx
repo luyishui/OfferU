@@ -14,10 +14,27 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Input, Button, Textarea } from "@nextui-org/react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown, ChevronUp, Plus, Trash2, GripVertical } from "lucide-react";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import RichTextEditor from "./RichTextEditor";
 
 /** 缁熶竴鐨?Input classNames 鈥?Bauhaus 娴呰壊纭竟椋庢牸 */
@@ -54,6 +71,31 @@ export function createEmptySkillEntry() {
 
 export function createEmptyCertificateEntry() {
   return { _entryType: "certificate", name: "", scoreOrLevel: "", issuer: "", date: "", url: "" };
+}
+
+function DraggableListItem({ id, children }: { id: string; children: ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.55 : 1,
+    zIndex: isDragging ? 30 : "auto",
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="relative">
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label="拖拽条目排序"
+        className="absolute left-0 top-3 z-10 flex h-8 w-6 cursor-grab items-center justify-center text-black/35 active:cursor-grabbing"
+      >
+        <GripVertical size={13} aria-hidden="true" />
+      </button>
+      <div className="pl-5">{children}</div>
+    </div>
+  );
 }
 
 /**
@@ -104,6 +146,31 @@ export default function SectionEditor({
   }, [contentJson.length]);
 
   const itemCount = useMemo(() => contentJson.length, [contentJson.length]);
+  const itemIds = useMemo(
+    () => contentJson.map((_, index) => `resume-${sectionType}-item-${index}`),
+    [contentJson.length, sectionType],
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const handleItemDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = itemIds.indexOf(String(active.id));
+    const newIndex = itemIds.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const collapsedState = arrayMove(
+      contentJson.map((_, index) => collapsedItems.has(index)),
+      oldIndex,
+      newIndex,
+    );
+    setCollapsedItems(new Set(collapsedState.flatMap((isCollapsed, index) => (isCollapsed ? [index] : []))));
+    onChange(arrayMove(contentJson, oldIndex, newIndex));
+  };
 
   const toggleItem = (index: number) => {
     setCollapsedItems((prev) => {
@@ -141,9 +208,11 @@ export default function SectionEditor({
 
   return (
     <div className="space-y-2.5">
-      {contentJson.map((item, i) => (
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleItemDragEnd}>
+        <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
+          {contentJson.map((item, i) => (
+            <DraggableListItem key={itemIds[i]} id={itemIds[i]}>
         <div
-          key={i}
           className="bauhaus-panel-sm space-y-2.5 bg-[#F0F0F0] p-3"
           data-testid={`resume-item-${sectionType}-${i}`}
         >
@@ -323,7 +392,10 @@ export default function SectionEditor({
             )}
           </AnimatePresence>
         </div>
-      ))}
+            </DraggableListItem>
+          ))}
+        </SortableContext>
+      </DndContext>
 
       {sectionType === "skill" ? (
         <div className="grid grid-cols-2 gap-2">
