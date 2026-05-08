@@ -20,6 +20,7 @@ import {
   normalizeResumeSectionsForEditor,
   splitSkillAndCertificateEntries,
 } from "../utils/sectionNormalization";
+import { splitBullets, textFromHtml } from "@/lib/resumeText";
 
 // 注册字体（幂等）
 registerFonts();
@@ -44,25 +45,12 @@ interface ResumePDFProps {
 
 /** 将 HTML 描述中的 <li> 提取为纯文本 bullet 数组 */
 function extractBullets(html: string): string[] {
-  if (!html) return [];
-  const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
-  const matches = [...html.matchAll(liRegex)];
-  if (matches.length > 0) {
-    return matches.map((m) => m[1].replace(/<[^>]*>/g, "").trim()).filter(Boolean);
-  }
-  const stripped = html
-    .replace(/<\/?(ul|ol)[^>]*>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>\s*<p[^>]*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .trim();
-  if (!stripped) return [];
-  return stripped.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  return splitBullets(html);
 }
 
 /** 纯文本化 HTML */
 function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, "").trim();
+  return textFromHtml(html);
 }
 
 export default function ResumePDF({

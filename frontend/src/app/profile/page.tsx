@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Spinner } from "@nextui-org/react";
+import { Button, Spinner } from "@nextui-org/react";
 import {
   type ArchiveTab,
   type PersonalArchive,
@@ -25,6 +25,7 @@ import ArchiveTabsHeader from "./components/archive/ArchiveTabsHeader";
 import ArchiveSettingsDialog from "./components/archive/ArchiveSettingsDialog";
 import ResumeArchiveEditor from "./components/archive/ResumeArchiveEditor";
 import ApplicationArchiveEditor from "./components/archive/ApplicationArchiveEditor";
+import { ProfileOnboarding } from "./components/ProfileOnboarding";
 
 export default function ProfilePage() {
   const { data: profile, mutate, isLoading } = useProfile();
@@ -33,6 +34,7 @@ export default function ProfilePage() {
   const [activeTab, setActiveTab] = useState<ArchiveTab>("resume");
   const [focusSection, setFocusSection] = useState<string | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -42,6 +44,7 @@ export default function ProfilePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastProfileArchiveUpdatedAtRef = useRef("");
   const archiveDirtyRef = useRef(false);
+  const autoOpenedOnboardingRef = useRef(false);
 
   // Sync archive from profile data
   useEffect(() => {
@@ -55,12 +58,25 @@ export default function ProfilePage() {
   }, [profile]);
 
   const metrics = useMemo(() => computeArchiveCompleteness(archive), [archive]);
-
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 5500);
     return () => clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!profile || autoOpenedOnboardingRef.current || archiveDirtyRef.current) return;
+    const profileArchive = normalizePersonalArchiveFromProfile(profile);
+    const isBlankProfile =
+      !profileArchive.resumeArchive.basicInfo.name.trim() &&
+      profileArchive.resumeArchive.education.length === 0 &&
+      profileArchive.resumeArchive.projects.length === 0 &&
+      profileArchive.resumeArchive.workExperiences.length === 0 &&
+      profileArchive.resumeArchive.internshipExperiences.length === 0;
+    if (!isBlankProfile) return;
+    autoOpenedOnboardingRef.current = true;
+    setShowOnboarding(true);
+  }, [profile]);
 
   // === Save ===
   const handleSave = async () => {
@@ -240,6 +256,21 @@ export default function ProfilePage() {
         disabled={importing}
       />
 
+      {showOnboarding && (
+        <ProfileOnboarding
+          currentArchive={archive}
+          profile={profile}
+          onClose={() => setShowOnboarding(false)}
+          onComplete={async (nextArchive) => {
+            archiveDirtyRef.current = false;
+            setArchive(nextArchive);
+            setShowOnboarding(false);
+            await mutate();
+            setNotice("新人投递档案已生成，可以开始继续补细节或直接制作简历。");
+          }}
+        />
+      )}
+
       {/* Header */}
       <ArchiveIntroCard
         onImport={triggerImport}
@@ -247,6 +278,18 @@ export default function ProfilePage() {
         saving={saving}
         importing={importing}
       />
+
+      <div className="bauhaus-panel-sm flex flex-col gap-3 bg-[var(--surface)] p-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-black">新人投递档案向导</p>
+          <p className="mt-1 text-xs text-black/55">
+            按 4 步补齐实名、教育、岗位、经历和技能，系统会同步生成简历档案与网申档案。
+          </p>
+        </div>
+        <Button className="bauhaus-button bauhaus-button-black" onPress={() => setShowOnboarding(true)}>
+          开始向导
+        </Button>
+      </div>
 
       {/* Completeness */}
       <ArchiveCompletenessBar metrics={metrics} onJump={handleJump} />

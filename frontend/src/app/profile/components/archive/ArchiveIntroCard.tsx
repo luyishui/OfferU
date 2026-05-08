@@ -18,7 +18,7 @@ export default function ArchiveIntroCard(props: ArchiveIntroCardProps) {
           <p className="bauhaus-label text-black/60">个人职业信息中心</p>
           <h1 className="text-3xl font-bold text-black md:text-4xl">个人档案库</h1>
           <p className="max-w-3xl text-sm leading-relaxed text-black/70 md:text-base">
-            统一管理用于简历生成与官网投递的个人职业信息。简历档案用于生成简历，投递档案用于官网网申与插件填表。
+            统一管理用于简历生成与官网投递的个人信息。简历档案负责表达，投递档案负责网申和插件填表。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 md:justify-end">

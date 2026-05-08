@@ -214,6 +214,49 @@ export interface HarnessAgentJobCard {
   summary?: string;
 }
 
+export interface HarnessAgentAlert {
+  code: string;
+  severity: "low" | "medium" | "high" | string;
+  title: string;
+  message: string;
+  action?: string;
+}
+
+export interface HarnessAgentProactiveSuggestion {
+  title: string;
+  description: string;
+  prompt: string;
+}
+
+export interface HarnessAgentMemorySnapshot {
+  schema_version: string;
+  user_stage: "unknown" | "campus" | "experienced" | string;
+  confidence: number;
+  facts: string[];
+  preferences: string[];
+  goals: string[];
+  risks: string[];
+  events: string[];
+  updated_at: string;
+}
+
+export interface HarnessAgentConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_message: string;
+}
+
+export interface HarnessAgentConversationDetail {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: HarnessAgentMessage[];
+}
+
 export interface HarnessAgentResponse {
   assistant_message: string;
   mode: string;
@@ -226,13 +269,43 @@ export interface HarnessAgentResponse {
   transferable_skills_summary?: string;
   quick_wins?: string[];
   reality_check?: Record<string, any>;
+  user_stage?: "unknown" | "campus" | "experienced" | string;
+  stage_confidence?: number;
+  stage_signals?: string[];
+  memory_snapshot?: HarnessAgentMemorySnapshot;
+  alerts?: HarnessAgentAlert[];
+  proactive_suggestions?: HarnessAgentProactiveSuggestion[];
+  conversation_id?: string;
+  conversation_title?: string;
 }
 
 export const harnessAgentApi = {
-  chat: (data: { messages: HarnessAgentMessage[]; confirmed_action_ids?: string[] }) =>
+  chat: (data: {
+    messages: HarnessAgentMessage[];
+    confirmed_action_ids?: string[];
+    memory?: Record<string, any>;
+    conversation_id?: string | null;
+  }) =>
     request<HarnessAgentResponse>("/api/harness-agent/chat", {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+  conversations: () =>
+    request<{ conversations: HarnessAgentConversationSummary[] }>("/api/harness-agent/conversations"),
+  conversation: (id: string) =>
+    request<HarnessAgentConversationDetail>(`/api/harness-agent/conversations/${encodeURIComponent(id)}`),
+  deleteConversation: (id: string) =>
+    request<{ ok: boolean }>(`/api/harness-agent/conversations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  exportMemory: (format: "json" | "markdown" = "json") =>
+    request<{ format: string; content: any; memory: HarnessAgentMemorySnapshot }>(
+      `/api/harness-agent/memory/export?${buildQuery({ format })}`
+    ),
+  importMemory: (content: Record<string, any> | string) =>
+    request<{ ok: boolean; memory: HarnessAgentMemorySnapshot }>("/api/harness-agent/memory/import", {
+      method: "POST",
+      body: JSON.stringify({ content }),
     }),
 };
 
@@ -260,6 +333,14 @@ export interface ProfileAgentResponse {
   patch: ProfileAgentPatch;
   agent_trace?: Record<string, any>[];
   stop_reason?: string;
+}
+
+export interface ProfileAgentSessionDetail {
+  id: number;
+  status: string;
+  state: Record<string, any>;
+  pending_patch?: ProfileAgentPatch | null;
+  messages_json: Record<string, any>[];
 }
 
 export const profileApi = {
@@ -359,6 +440,9 @@ export const profileApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
+  getProfileAgentSession: (sessionId: number) =>
+    request<ProfileAgentSessionDetail>(`/api/profile/agent/sessions/${sessionId}`),
 
   applyProfileAgentPatch: (data: { session_id: number; patch?: ProfileAgentPatch }) =>
     request("/api/profile/agent/apply-patch", {

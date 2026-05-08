@@ -1,28 +1,8 @@
+import { splitBullets, textFromHtml } from "@/lib/resumeText";
 import { KeywordHighlightView } from "../KeywordHighlightView";
 import type { NormalizedResumeData, NormalizedResumeItem, NormalizedResumeSection } from "./templateSettings";
 
-export function textFromHtml(value: string) {
-  return (value || "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>\s*<p[^>]*>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .trim();
-}
-
-export function splitBullets(value: string): string[] {
-  const text = textFromHtml(value);
-  if (!text) return [];
-  return text
-    .split(/\n+/)
-    .flatMap((line) => line.split(/(?=\s*(?:[-*•]|\d+[.、]))\s*/))
-    .map((item) => item.replace(/^[-*•]\s*/, "").replace(/^\d+[.、]\s*/, "").trim())
-    .filter(Boolean);
-}
+export { splitBullets, textFromHtml };
 
 export function dateRange(start?: string, end?: string) {
   const parts = [start, end].map((item) => String(item || "").trim()).filter(Boolean);

@@ -1,13 +1,15 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Chip, Input, ScrollShadow, Textarea } from "@nextui-org/react";
 import {
   Bot,
   Check,
   ChevronDown,
   FileText,
+  History,
   Loader2,
+  Plus,
   Send,
   Sparkles,
   Trash2,
@@ -35,7 +37,7 @@ function compactJsonPreview(value?: Record<string, any>) {
     })
     .slice(0, 4)
     .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(", ") : String(item)}`)
-    .join(" · ");
+    .join(" / ");
 }
 
 function stopReasonLabel(stopReason: string) {
@@ -45,11 +47,21 @@ function stopReasonLabel(stopReason: string) {
   return "建档模式";
 }
 
+function profileSessionTitle(session: any) {
+  if (!session) return "档案对话";
+  const id = session.id ? `#${session.id}` : "";
+  const count = Number(session.extracted_bullets_count || 0);
+  return count > 0 ? `档案对话 ${id} / ${count} 条候选` : `档案对话 ${id}`;
+}
+
 export function ProfileAgentDock() {
   const { mutate } = useSWRConfig();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [sessionId, setSessionId] = useState<number | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySessions, setHistorySessions] = useState<any[]>([]);
+  const [conversationTitle, setConversationTitle] = useState("新建档案对话");
   const [targetRole, setTargetRole] = useState("");
   const [targetCity, setTargetCity] = useState("");
   const [jobGoal, setJobGoal] = useState("");
@@ -60,7 +72,7 @@ export function ProfileAgentDock() {
     {
       id: "welcome",
       role: "assistant",
-      content: "把社招简历和目标岗位给我，我会先建一版档案，再围绕缺口继续追问。",
+      content: "把简历和目标岗位给我，我会先建一版档案，再围绕缺口继续追问。",
     },
   ]);
   const [patch, setPatch] = useState<ProfileAgentPatch | null>(null);
@@ -76,6 +88,19 @@ export function ProfileAgentDock() {
     () => Boolean(file || resumeText.trim() || targetRole.trim() || jobGoal.trim()),
     [file, jobGoal, resumeText, targetRole]
   );
+
+  const refreshHistory = async () => {
+    try {
+      const sessions = (await profileApi.listChatSessions(50)) as any[];
+      setHistorySessions((sessions || []).filter((item) => item.topic === "profile_builder"));
+    } catch {
+      setHistorySessions([]);
+    }
+  };
+
+  useEffect(() => {
+    if (open) refreshHistory();
+  }, [open]);
 
   const pushMessage = (role: AgentMessage["role"], content: string) => {
     setMessages((prev) => [
@@ -100,10 +125,12 @@ export function ProfileAgentDock() {
     stop_reason?: string;
   }) => {
     setSessionId(result.session_id);
+    setConversationTitle(`档案对话 #${result.session_id}`);
     setPatch(result.patch);
     setStopReason(result.stop_reason || "");
     setTraceCount(result.agent_trace?.length || 0);
     pushMessage("assistant", result.assistant_message || result.patch.next_question || "我继续整理了一版候选信息。");
+    refreshHistory();
   };
 
   const startAgent = async () => {
@@ -160,6 +187,7 @@ export function ProfileAgentDock() {
       pushMessage("assistant", "已写入个人档案。你可以继续补充经历，我会接着追问缺口。");
       setPatch(null);
       setStopReason("needs_more_input");
+      refreshHistory();
     } catch (err: any) {
       setError(err.message || "写入档案失败");
     } finally {
@@ -176,6 +204,8 @@ export function ProfileAgentDock() {
     setError("");
     setStopReason("");
     setTraceCount(0);
+    setConversationTitle("新建档案对话");
+    setHistoryOpen(false);
     setMessages([
       {
         id: "welcome-reset",
@@ -183,6 +213,29 @@ export function ProfileAgentDock() {
         content: "重新开始。把简历和目标岗位给我，我来建档。",
       },
     ]);
+  };
+
+  const loadHistorySession = async (id: number) => {
+    setError("");
+    try {
+      const session = await profileApi.getProfileAgentSession(id);
+      const chatMessages = (session.messages_json || [])
+        .filter((item: any) => item?.role === "user" || item?.role === "assistant")
+        .map((item: any, index: number) => ({
+          id: `history-${id}-${index}`,
+          role: item.role as AgentMessage["role"],
+          content: String(item.content || ""),
+        }));
+      setSessionId(id);
+      setConversationTitle(`档案对话 #${id}`);
+      setMessages(chatMessages.length ? chatMessages : [{ id: `history-empty-${id}`, role: "assistant", content: "已打开历史对话。" }]);
+      setPatch((session.pending_patch as ProfileAgentPatch | null) || null);
+      setStopReason("");
+      setTraceCount(0);
+      setHistoryOpen(false);
+    } catch (err: any) {
+      setError(err.message || "加载历史对话失败");
+    }
   };
 
   return (
@@ -200,10 +253,16 @@ export function ProfileAgentDock() {
                   <Bot size={22} />
                 </div>
                 <div className="min-w-0">
-                  <p className="bauhaus-label text-black/55">AI Workspace</p>
-                  <h2 className="mt-1 truncate text-2xl font-black tracking-[-0.05em] text-black">
-                    AI 求职助手
-                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryOpen((value) => !value)}
+                    className="flex max-w-[230px] items-center gap-1 text-left text-[11px] font-black uppercase tracking-[0.08em] text-black/65 hover:text-black"
+                    title="打开历史对话"
+                  >
+                    <History size={12} />
+                    <span className="truncate">{conversationTitle}</span>
+                  </button>
+                  <h2 className="mt-1 truncate text-2xl font-black text-black">AI 求职助手</h2>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
@@ -232,10 +291,7 @@ export function ProfileAgentDock() {
 
             <div className="mt-3 flex flex-wrap gap-2">
               <Chip variant="flat" className="bauhaus-chip border-2 border-black bg-[var(--surface-muted)] px-3 py-2 text-black">
-                Profile 建档
-              </Chip>
-              <Chip variant="flat" className="bauhaus-chip border-2 border-black bg-[#F0C020] px-3 py-2 text-black">
-                Harness Loop
+                档案建模
               </Chip>
               <Chip variant="flat" className="bauhaus-chip border-2 border-black bg-[#F7E4E1] px-3 py-2 text-black">
                 {stopReasonLabel(stopReason)}
@@ -248,6 +304,42 @@ export function ProfileAgentDock() {
             </div>
           </header>
 
+          {historyOpen && (
+            <div className="border-b-2 border-black bg-white px-4 py-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-black text-black">历史对话</p>
+                <Button
+                  size="sm"
+                  startContent={<Plus size={13} />}
+                  onPress={resetSession}
+                  className="h-8 border-2 border-black bg-[#F0C020] px-2 text-xs font-black text-black"
+                >
+                  新建
+                </Button>
+              </div>
+              <div className="max-h-40 space-y-2 overflow-y-auto">
+                {historySessions.length === 0 && (
+                  <p className="border border-black/20 bg-[var(--surface-muted)] px-3 py-2 text-xs font-semibold text-black/60">
+                    暂无历史对话
+                  </p>
+                )}
+                {historySessions.map((session) => (
+                  <button
+                    key={session.id}
+                    type="button"
+                    onClick={() => loadHistorySession(Number(session.id))}
+                    className={`w-full border px-3 py-2 text-left ${
+                      Number(session.id) === sessionId ? "border-black bg-[#FFF4D8]" : "border-black/20 bg-white"
+                    }`}
+                  >
+                    <p className="truncate text-xs font-black text-black">{profileSessionTitle(session)}</p>
+                    <p className="mt-0.5 text-[11px] font-medium text-black/55">{session.status || "active"}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <ScrollShadow className="flex-1 overflow-y-auto p-4">
             {!sessionId && (
               <div className="bauhaus-panel-sm mb-4 space-y-3 bg-white p-3">
@@ -259,31 +351,10 @@ export function ProfileAgentDock() {
                   onChange={(event) => setFile(event.target.files?.[0] || null)}
                 />
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <Input
-                    size="sm"
-                    label="目标岗位"
-                    value={targetRole}
-                    onValueChange={setTargetRole}
-                    variant="bordered"
-                    classNames={bauhausFieldClassNames}
-                  />
-                  <Input
-                    size="sm"
-                    label="目标城市"
-                    value={targetCity}
-                    onValueChange={setTargetCity}
-                    variant="bordered"
-                    classNames={bauhausFieldClassNames}
-                  />
+                  <Input size="sm" label="目标岗位" value={targetRole} onValueChange={setTargetRole} variant="bordered" classNames={bauhausFieldClassNames} />
+                  <Input size="sm" label="目标城市" value={targetCity} onValueChange={setTargetCity} variant="bordered" classNames={bauhausFieldClassNames} />
                 </div>
-                <Input
-                  size="sm"
-                  label="求职偏好"
-                  value={jobGoal}
-                  onValueChange={setJobGoal}
-                  variant="bordered"
-                  classNames={bauhausFieldClassNames}
-                />
+                <Input size="sm" label="求职偏好" value={jobGoal} onValueChange={setJobGoal} variant="bordered" classNames={bauhausFieldClassNames} />
                 <Textarea
                   minRows={2}
                   maxRows={4}

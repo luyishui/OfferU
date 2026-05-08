@@ -72,6 +72,45 @@ def _as_str_list(value: Any) -> list[str]:
     return [item.strip() for item in re.split(r"[,，、；;\n|]+", text) if item.strip()]
 
 
+_DESCRIPTION_BULLET_RE = re.compile(r"^\s*(?:[•·●▪◦*+-]|\d+[.)、]|[（(]?\d+[）)])\s*")
+
+
+def _description_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            items.extend(_description_items(item))
+        return items
+
+    text = _as_str(value)
+    if not text:
+        return []
+
+    raw_lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
+    if not raw_lines:
+        return []
+
+    has_explicit_bullets = any(_DESCRIPTION_BULLET_RE.match(line) for line in raw_lines)
+    if not has_explicit_bullets:
+        return [re.sub(r"\s+", " ", " ".join(raw_lines)).strip()]
+
+    items: list[str] = []
+    current = ""
+    for line in raw_lines:
+        if _DESCRIPTION_BULLET_RE.match(line):
+            if current:
+                items.append(current.strip())
+            current = _DESCRIPTION_BULLET_RE.sub("", line).strip()
+        elif current:
+            current = f"{current} {line}".strip()
+        else:
+            current = line
+
+    if current:
+        items.append(current.strip())
+    return [item for item in items if item]
+
+
 def _archive_id(prefix: str, seed: str) -> str:
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
     return f"{prefix}_{digest}"
@@ -82,9 +121,9 @@ def _copy_json(value: Any) -> Any:
 
 
 def _descriptions(value: Any, fallback: str = "") -> list[str]:
-    lines = _as_str_list(value)
+    lines = _description_items(value)
     if not lines and fallback:
-        lines = _as_str_list(fallback)
+        lines = _description_items(fallback)
     return lines or [""]
 
 

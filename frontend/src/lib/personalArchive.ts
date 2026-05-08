@@ -1,4 +1,5 @@
 import type { ProfileData, ProfileSection } from "@/lib/hooks";
+import { descriptionLinesToPlainText, splitBullets } from "@/lib/resumeText";
 
 export type ArchiveTab = "resume" | "application";
 
@@ -333,7 +334,7 @@ function cloneArchive(archive: PersonalArchive): PersonalArchive {
 }
 
 function normalizeDescriptions(value: unknown): string[] {
-  const list = asStringList(value);
+  const list = Array.isArray(value) ? value.flatMap((item) => splitBullets(asString(item))) : splitBullets(asString(value));
   return list.length > 0 ? list : [""];
 }
 
@@ -1184,10 +1185,7 @@ function toSyntheticSectionId(seed: string, index: number): number {
 }
 
 function listToBullet(lines: string[]): string {
-  return lines
-    .map((item) => asString(item).trim())
-    .filter(Boolean)
-    .join("\n");
+  return descriptionLinesToPlainText(lines);
 }
 
 function buildSection(

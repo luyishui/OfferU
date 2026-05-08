@@ -119,7 +119,6 @@ export function useDraggableDock<TElement extends HTMLElement = HTMLElement>(opt
         startY: event.clientY,
         moved: false,
       };
-      setPosition(clamped);
       window.addEventListener("pointermove", handlePointerMove);
       window.addEventListener("pointerup", handlePointerUp);
     },

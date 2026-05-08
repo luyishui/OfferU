@@ -718,6 +718,26 @@ def _fallback_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     current_section: str | None = None
+    grouped_section: str | None = None
+    grouped_lines: list[str] = []
+
+    def flush_group() -> None:
+        nonlocal grouped_section, grouped_lines
+        if not grouped_lines:
+            return
+        text = "\n".join(grouped_lines).strip()
+        grouped_lines = []
+        section = grouped_section
+        grouped_section = None
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidate = _candidate_from_resume_line(text, section, len(candidates))
+        if candidate:
+            candidates.append(_normalize_candidate(candidate["section_type"], candidate))
 
     for raw in (resume_text or "").splitlines():
         line = _clean_resume_line(raw)
@@ -737,6 +757,15 @@ def _fallback_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
         if len(line) < 4:
             continue
 
+        if line_section in {"experience", "internship", "project"}:
+            if grouped_section and grouped_section != line_section:
+                flush_group()
+            grouped_section = line_section
+            grouped_lines.append(line)
+            continue
+
+        flush_group()
+
         key = line.lower()
         if key in seen:
             continue
@@ -747,6 +776,8 @@ def _fallback_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
             candidates.append(_normalize_candidate(candidate["section_type"], candidate))
         if len(candidates) >= 12:
             break
+
+    flush_group()
 
     if not candidates and (resume_text or "").strip():
         snippet = " ".join((resume_text or "").split())
@@ -776,6 +807,13 @@ async def _extract_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
         "certificate: {\"name\":证书名, \"issuer\":颁发机构, \"date\":日期, \"bullet\":一行摘要}\n\n"
         "section_type 仅允许 education/experience/project/activity/skill/certificate/honor/language/general。\n"
         "要求: 1) 只改写不编造；2) 所有数字必须来自原文；3) description 保留完整量化数据；4) confidence 在 0-1。"
+    )
+    prompt += (
+        "\n\nIMPORTANT: The source may come from PDF text extraction. PDF visual line wraps are not separate resume bullets. "
+        "Merge wrapped lines that belong to the same sentence or responsibility. "
+        "For experience/project description, use one string. Only insert newlines or bullet markers when the original text has explicit bullet points, numbering, or clearly separate achievements. "
+        "Do not create a separate candidate or description item from each visual line. "
+        "Keep Chinese text as valid UTF-8; never output mojibake or question marks for Chinese characters."
     )
 
     try:

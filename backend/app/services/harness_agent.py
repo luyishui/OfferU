@@ -3,6 +3,18 @@ from __future__ import annotations
 import re
 from typing import Any, Awaitable, Callable
 
+from app.services.harness_guardian import (
+    build_proactive_suggestions,
+    classify_user_stage,
+    detect_harness_anomalies,
+)
+from app.services.harness_memory import (
+    load_agent_memory,
+    normalize_agent_memory,
+    remember_turn,
+    save_agent_memory,
+)
+
 ToolHandler = Callable[..., Awaitable[Any]]
 RiskLevel = str
 
@@ -761,3 +773,108 @@ async def execute_planned_actions(
         "tool_calls": tool_calls,
         "blocked_actions": blocked_actions,
     }
+
+
+_run_harness_agent_turn_core = run_harness_agent_turn
+
+
+async def run_harness_agent_turn(
+    *,
+    messages: list[dict[str, str]],
+    confirmed_action_ids: list[str] | None = None,
+    tool_runner: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None,
+    memory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    user_message = last_user_message(messages)
+    mode = classify_intent(user_message)
+    runner = tool_runner or default_tool_runner
+    memory_state = normalize_agent_memory(memory) if memory is not None else load_agent_memory()
+    cached_profile: dict[str, Any] | None = None
+
+    async def cached_runner(name: str, args: dict[str, Any]) -> Any:
+        nonlocal cached_profile
+        if name == "get_profile" and cached_profile is not None:
+            return cached_profile
+        result = await runner(name, args)
+        if name == "get_profile" and isinstance(result, dict):
+            cached_profile = result
+        return result
+
+    profile_result = await cached_runner("get_profile", {})
+    profile = profile_result if isinstance(profile_result, dict) else {}
+    cached_profile = profile
+    stage_result = classify_user_stage(profile=profile, messages=messages, memory=memory_state)
+    user_stage = str(stage_result.get("stage") or "unknown")
+    memory_state = remember_turn(memory_state, user_message, stage=user_stage)
+
+    def decorate_response(
+        payload: dict[str, Any],
+        *,
+        jobs: list[dict[str, Any]] | None = None,
+        applications: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        effective_profile = cached_profile or profile
+        alerts = detect_harness_anomalies(
+            profile=effective_profile,
+            jobs=jobs or [],
+            applications=applications or [],
+            memory=memory_state,
+            stage=user_stage,
+        )
+        payload.update(
+            {
+                "user_stage": user_stage,
+                "stage_confidence": stage_result.get("confidence", 0.0),
+                "stage_signals": stage_result.get("signals", []),
+                "memory_snapshot": memory_state,
+                "alerts": alerts,
+                "proactive_suggestions": build_proactive_suggestions(
+                    stage=user_stage,
+                    mode=str(payload.get("mode") or mode),
+                    alerts=alerts,
+                    memory=memory_state,
+                ),
+            }
+        )
+        if memory is None:
+            save_agent_memory(memory_state)
+        return payload
+
+    if user_stage == "unknown" and mode == "general":
+        return decorate_response(
+            {
+                "assistant_message": (
+                    "我先确认一个关键身份：你现在是校招/应届/实习，还是社招/跳槽？"
+                    "这会决定我主动关注的东西。校招我会更盯档案完整度、实习/项目证据、网申截止时间和每日岗位推荐；"
+                    "社招我会更看行业经验、跳槽叙事、薪资地点和投递优先级。"
+                ),
+                "mode": "stage_discovery",
+                "requires_confirmation": False,
+                "tool_calls": [{"tool": "get_profile", "args": {}, "result": profile}],
+                "proposed_actions": [],
+                "career_paths": [],
+                "job_cards": [],
+                "next_steps": [
+                    "回复“我是校招/应届/实习”或“我是社招/跳槽”。",
+                    "也可以先导入 Codex、Claude Code 或本地 Markdown/JSON 记忆。",
+                ],
+            }
+        )
+
+    response = await _run_harness_agent_turn_core(
+        messages=messages,
+        confirmed_action_ids=confirmed_action_ids,
+        tool_runner=cached_runner,
+    )
+    jobs: list[dict[str, Any]] = []
+    applications: list[dict[str, Any]] = []
+    for call in response.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        result = call.get("result")
+        if call.get("tool") == "list_jobs" and isinstance(result, dict):
+            raw_jobs = result.get("jobs") or result.get("items") or []
+            jobs = [item for item in raw_jobs if isinstance(item, dict)]
+        if call.get("tool") == "list_applications" and isinstance(result, list):
+            applications = [item for item in result if isinstance(item, dict)]
+    return decorate_response(response, jobs=jobs, applications=applications)
