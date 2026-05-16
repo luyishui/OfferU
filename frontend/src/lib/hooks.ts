@@ -653,9 +653,13 @@ export interface ProfileChatSessionDetail extends ProfileChatSessionSummary {
   latest_candidates: ProfileSessionCandidate[];
 }
 
+export type ResumeImportParseMode = "ai" | "mechanical";
+
 export interface ProfileImportResult {
   session_id: number;
+  agent_session_id?: number;
   filename: string;
+  parse_mode?: ResumeImportParseMode;
   text_length: number;
   base_info?: {
     name?: string;
@@ -870,11 +874,12 @@ export async function streamProfileChat(
   if (tail) emit(tail);
 }
 
-export async function importProfileResume(file: File) {
+export async function importProfileResume(file: File, parseMode: ResumeImportParseMode = "ai") {
   const formData = new FormData();
   formData.append("file", file);
+  const params = new URLSearchParams({ parse_mode: parseMode });
 
-  const res = await fetch(`${API_BASE}/api/profile/import-resume`, {
+  const res = await fetch(`${API_BASE}/api/profile/import-resume?${params.toString()}`, {
     method: "POST",
     body: formData,
   });

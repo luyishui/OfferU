@@ -238,6 +238,20 @@ export function ProfileAgentDock() {
     }
   };
 
+  useEffect(() => {
+    const handleOpenProfileAgent = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: number }>).detail || {};
+      setOpen(true);
+      if (detail.sessionId) {
+        void loadHistorySession(Number(detail.sessionId));
+      } else {
+        void refreshHistory();
+      }
+    };
+    window.addEventListener("offeru:open-profile-agent", handleOpenProfileAgent);
+    return () => window.removeEventListener("offeru:open-profile-agent", handleOpenProfileAgent);
+  }, []);
+
   return (
     <div
       ref={dockRef}

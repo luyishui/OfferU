@@ -165,6 +165,29 @@ function DescriptionArrayEditor(props: {
   );
 }
 
+function SingleDescriptionEditor(props: {
+  label: string;
+  values: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const value = props.values.filter((item) => item.trim()).join("\n");
+
+  return (
+    <Textarea
+      label={props.label}
+      value={value}
+      minRows={5}
+      variant="bordered"
+      classNames={{
+        inputWrapper: "border border-black/15 bg-[var(--surface)] shadow-[1px_1px_0_0_rgba(18,18,18,0.08)]",
+      }}
+      onValueChange={(nextValue) => {
+        props.onChange([nextValue]);
+      }}
+    />
+  );
+}
+
 function SectionFrame(props: {
   sectionKey: string;
   title: string;
@@ -338,7 +361,7 @@ function WorkItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="工作描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <SingleDescriptionEditor label="工作描述" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
     </ItemShell>
   );
 }
@@ -366,7 +389,7 @@ function InternshipItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="实习描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <SingleDescriptionEditor label="实习描述" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
     </ItemShell>
   );
 }
@@ -395,7 +418,7 @@ function ProjectItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="项目描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <SingleDescriptionEditor label="项目描述" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
     </ItemShell>
   );
 }
@@ -627,7 +650,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="workExperiences"
         title="工作经历"
-        description="支持多条工作描述。" count={value.workExperiences.length}
+        description="一个工作经历对应一个完整描述框。" count={value.workExperiences.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "workExperiences"}
         missing={missingSet.has("workExperiences")}
         collapsed={sectionState.isCollapsed("workExperiences")}
@@ -650,7 +673,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="internshipExperiences"
         title="实习经历"
-        description="与工作经历分开维护。" count={value.internshipExperiences.length}
+        description="一个实习经历对应一个完整描述框。" count={value.internshipExperiences.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "internshipExperiences"}
         missing={missingSet.has("internshipExperiences")}
         collapsed={sectionState.isCollapsed("internshipExperiences")}
@@ -673,7 +696,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="projects"
         title="项目经历"
-        description="项目描述按条维护。" count={value.projects.length}
+        description="一个项目经历对应一个完整描述框。" count={value.projects.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "projects"}
         missing={missingSet.has("projects")}
         collapsed={sectionState.isCollapsed("projects")}
