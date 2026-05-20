@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, Card, CardBody, Input, Textarea } from "@nextui-org/react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Plus, Save, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Save, Trash2 } from "lucide-react";
+import RichTextEditor from "@/app/resume/components/RichTextEditor";
 import {
   type ResumeArchive,
   type ResumeAwardItem,
@@ -65,104 +66,6 @@ function useSectionState(focusSection: string | undefined) {
 
 function collsapsedOrDefault(value: boolean | undefined): boolean {
   return value ?? false;
-}
-
-function DescriptionArrayEditor(props: {
-  label: string;
-  values: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const values = props.values.length > 0 ? props.values : [""];
-
-  return (
-    <div className="space-y-2">
-      <div className="text-xs font-semibold text-black/60">{props.label}</div>
-      {values.map((item, index) => (
-        <div key={`${props.label}-${index}`} className="flex items-center gap-2">
-          <Textarea
-            value={item}
-            minRows={2}
-            variant="bordered"
-            className="flex-1"
-            classNames={{
-              inputWrapper: "border border-black/15 bg-[var(--surface)] shadow-[1px_1px_0_0_rgba(18,18,18,0.08)]",
-            }}
-            onValueChange={(nextValue) => {
-              const next = values.slice();
-              next[index] = nextValue;
-              props.onChange(next);
-            }}
-          />
-          <div className="flex shrink-0 items-center gap-1 self-center">
-            <Button
-              size="sm"
-              isIconOnly
-              aria-label="新增描述"
-              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
-              onPress={() => {
-                const next = values.slice();
-                next.splice(index + 1, 0, "");
-                props.onChange(next);
-              }}
-            >
-              <Plus size={14} />
-            </Button>
-            <Button
-              size="sm"
-              isIconOnly
-              aria-label="上移描述"
-              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
-              isDisabled={index === 0}
-              onPress={() => {
-                if (index === 0) return;
-                const next = values.slice();
-                const current = next[index];
-                next[index] = next[index - 1];
-                next[index - 1] = current;
-                props.onChange(next);
-              }}
-            >
-              <ArrowUp size={14} />
-            </Button>
-            <Button
-              size="sm"
-              isIconOnly
-              aria-label="下移描述"
-              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
-              isDisabled={index >= values.length - 1}
-              onPress={() => {
-                if (index >= values.length - 1) return;
-                const next = values.slice();
-                const current = next[index];
-                next[index] = next[index + 1];
-                next[index + 1] = current;
-                props.onChange(next);
-              }}
-            >
-              <ArrowDown size={14} />
-            </Button>
-            <Button
-              size="sm"
-              isIconOnly
-              aria-label="删除描述"
-              className="bauhaus-button bauhaus-button-red !h-8 !min-w-8 !w-8 !px-0 !py-0"
-              onPress={() => {
-                if (values.length <= 1) {
-                  props.onChange([""]);
-                  return;
-                }
-                const next = values.slice();
-                next.splice(index, 1);
-                props.onChange(next);
-              }}
-            >
-              <Trash2 size={14} />
-            </Button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function SectionFrame(props: {
@@ -309,7 +212,10 @@ function EducationItemEditor(props: {
         }
         variant="bordered"
       />
-      <DescriptionArrayEditor label="描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} minHeight={80} placeholder="补充说明（可选）" />
+      </div>
     </ItemShell>
   );
 }
@@ -338,7 +244,10 @@ function WorkItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="工作描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">工作描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} placeholder="描述你的工作职责和成果..." />
+      </div>
     </ItemShell>
   );
 }
@@ -366,7 +275,10 @@ function InternshipItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="实习描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">实习描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} placeholder="描述实习职责和成果..." />
+      </div>
     </ItemShell>
   );
 }
@@ -395,7 +307,10 @@ function ProjectItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="项目描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">项目描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} placeholder="描述项目亮点和你的贡献..." />
+      </div>
     </ItemShell>
   );
 }
@@ -474,7 +389,10 @@ function AwardItemEditor(props: {
         <Input label="颁发机构" value={item.issuer} onValueChange={(v) => props.onChange({ ...item, issuer: v })} variant="bordered" />
         <Input label="获奖时间" value={item.awardedAt} onValueChange={(v) => props.onChange({ ...item, awardedAt: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">获奖描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} placeholder="补充奖项背景与成果..." />
+      </div>
     </ItemShell>
   );
 }
@@ -501,7 +419,10 @@ function PersonalExperienceItemEditor(props: {
         <Input label="开始时间" value={item.startDate} onValueChange={(v) => props.onChange({ ...item, startDate: v })} variant="bordered" />
         <Input label="结束时间" value={item.endDate} onValueChange={(v) => props.onChange({ ...item, endDate: v })} variant="bordered" />
       </div>
-      <DescriptionArrayEditor label="经历描述（多条）" values={item.descriptions} onChange={(next) => props.onChange({ ...item, descriptions: next })} />
+      <div>
+        <label className="mb-1 block text-xs font-semibold tracking-[0.06em] text-black/55">经历描述</label>
+        <RichTextEditor content={item.description} onChange={(v) => props.onChange({ ...item, description: v })} placeholder="输入个人经历内容..." />
+      </div>
     </ItemShell>
   );
 }

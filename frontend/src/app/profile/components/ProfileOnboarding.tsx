@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Button, Chip, Input, Spinner, Textarea } from "@nextui-org/react";
+import { Button, Chip, Input, Textarea } from "@nextui-org/react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,7 +11,6 @@ import {
   FileText,
   GraduationCap,
   Sparkles,
-  Upload,
   X,
 } from "lucide-react";
 import {
@@ -23,7 +22,8 @@ import {
   normalizePersonalArchiveFromProfile,
   personalArchiveFactories,
 } from "@/lib/personalArchive";
-import { importProfileResume, updateProfileData, type ProfileData, type ProfileImportResult } from "@/lib/hooks";
+import { updateProfileData, type ProfileData, type ProfileImportResult } from "@/lib/hooks";
+import AIImportModal from "./AIImportModal";
 
 interface ProfileOnboardingProps {
   currentArchive?: PersonalArchive;
@@ -79,12 +79,14 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-function textLines(value: string): string[] {
+function textToHtml(value: string): string {
   const lines = value
     .split(/\n+/g)
     .map((item) => item.replace(/^[•·●▪◦*+\-\d.)、\s]+/, "").trim())
     .filter(Boolean);
-  return lines.length > 0 ? lines : [value.trim()].filter(Boolean);
+  if (lines.length === 0) return "";
+  if (lines.length === 1) return `<p>${lines[0]}</p>`;
+  return `<ul>${lines.map((l) => `<li>${l}</li>`).join("")}</ul>`;
 }
 
 function buildImportedArchive(imported: ProfileImportResult | null, profile?: ProfileData | null): PersonalArchive {
@@ -157,7 +159,7 @@ export function buildOnboardingArchive(
       major: form.major.trim(),
       endDate: form.graduationDate.trim(),
       gpa: form.gpa.trim(),
-      descriptions: form.gpa.trim() ? [`GPA：${form.gpa.trim()}`] : [""],
+      description: form.gpa.trim() ? `<p>GPA：${form.gpa.trim()}</p>` : "",
     });
   }
 
@@ -176,7 +178,7 @@ export function buildOnboardingArchive(
           ...personalArchiveFactories.createEmptyProject(),
           projectName: `补充经历 ${index + 1}`,
           projectRole: primaryRole ? `${primaryRole}候选人` : "",
-          descriptions: textLines(item),
+          description: textToHtml(item),
         });
       });
   }
@@ -260,10 +262,9 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
   });
   const [customRole, setCustomRole] = useState("");
   const [imported, setImported] = useState<ProfileImportResult | null>(null);
-  const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [aiImportOpen, setAiImportOpen] = useState(false);
 
   const previewArchive = useMemo(() => buildOnboardingArchive(form, imported, profile), [form, imported, profile]);
   const missing = useMemo(() => getDeliverableMissing(previewArchive), [previewArchive]);
@@ -307,29 +308,17 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
     setCustomRole("");
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    setImporting(true);
-    setError("");
-    try {
-      const result = await importProfileResume(file);
-      setImported(result);
-      const base = result.base_info || {};
-      setForm((prev) => ({
-        ...prev,
-        name: prev.name || clean(base.name),
-        phone: prev.phone || clean(base.phone),
-        email: prev.email || clean(base.email),
-        currentCity: prev.currentCity || clean(base.current_city),
-        summary: prev.summary || clean(base.summary || base.personal_summary),
-      }));
-    } catch (err: any) {
-      setError(err.message || "导入失败，请改用手填经历。");
-    } finally {
-      setImporting(false);
-    }
+  const handleAiImport = (result: ProfileImportResult) => {
+    setImported(result);
+    const base = result.base_info || {};
+    setForm((prev) => ({
+      ...prev,
+      name: prev.name || clean(base.name),
+      phone: prev.phone || clean(base.phone),
+      email: prev.email || clean(base.email),
+      currentCity: prev.currentCity || clean(base.current_city),
+      summary: prev.summary || clean(base.summary || base.personal_summary),
+    }));
   };
 
   const handleFinish = async () => {
@@ -356,7 +345,6 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
 
   return (
     <div className="fixed inset-0 z-50 bg-[#f6f3ed]/95 p-4 text-black backdrop-blur-md">
-      <input ref={fileInputRef} type="file" accept=".pdf,.docx" className="hidden" onChange={handleFileChange} />
       <div className="mx-auto flex h-full max-w-6xl flex-col">
         <div className="flex items-center justify-between border-b border-black/10 py-3">
           <div>
@@ -437,9 +425,14 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
 
               {step === 2 && (
                 <StepFrame key="experience" direction={direction} icon={FileText} title="导入简历，或者先手填三段经历" subtitle="新人没有完整简历也没关系，先把可投递素材写进档案。">
-                  <Button className="w-full justify-center" variant="bordered" startContent={importing ? <Spinner size="sm" /> : <Upload size={16} />} onPress={() => fileInputRef.current?.click()} isDisabled={importing}>
-                    {importing ? "正在解析简历..." : imported ? `已导入 ${imported.filename}` : "上传 PDF / DOCX 简历"}
+                  <Button className="w-full justify-center" variant="bordered" startContent={<Sparkles size={16} />} onPress={() => setAiImportOpen(true)}>
+                    {imported ? `已导入 ${imported.filename === "ai-import" ? "AI 解析结果" : imported.filename}` : "AI 导入简历"}
                   </Button>
+                  <AIImportModal
+                    open={aiImportOpen}
+                    onClose={() => setAiImportOpen(false)}
+                    onImport={handleAiImport}
+                  />
                   <div className="mt-4 space-y-3">
                     {form.experiences.map((value, index) => (
                       <Textarea
