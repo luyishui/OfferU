@@ -52,6 +52,7 @@ from app.services.profile_schema import (
     normalize_base_info_payload,
     normalize_section_type_alias,
 )
+from app.services.profile_builder_agent import build_initial_agent_state, normalize_profile_agent_patch
 
 try:
     from app.agents.skills.conversational_extractor import generate_instant_draft as _generate_instant_draft
@@ -68,6 +69,8 @@ VALID_SECTION_TYPES = set(PROFILE_BUILTIN_SECTION_TYPES).union(
 PROFILE_CATEGORY_ORDER = ["education", "experience", "project", "skill", "certificate"]
 ALLOWED_RESUME_IMPORT_EXTENSIONS = {".pdf", ".docx"}
 MAX_RESUME_IMPORT_FILE_SIZE = 10 * 1024 * 1024
+RESUME_IMPORT_MODES = {"ai", "mechanical"}
+PROFILE_AGENT_TOPIC = "profile_builder"
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -877,7 +880,308 @@ def _fallback_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
     return candidates
 
 
-async def _extract_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
+def _candidate_normalized(candidate: dict[str, Any]) -> dict[str, Any]:
+    content_json = candidate.get("content_json") if isinstance(candidate, dict) else {}
+    if not isinstance(content_json, dict):
+        return {}
+    normalized = content_json.get("normalized")
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _candidate_merge_key(candidate: dict[str, Any]) -> tuple[str, str] | None:
+    section_type = normalize_section_type_alias(str(candidate.get("section_type") or ""))
+    if section_type not in {"experience", "project"}:
+        return None
+
+    normalized = _candidate_normalized(candidate)
+    if section_type == "experience":
+        company = str(normalized.get("company") or "").strip()
+        if company:
+            return section_type, company.lower()
+    if section_type == "project":
+        name = str(normalized.get("name") or "").strip()
+        if name:
+            return section_type, name.lower()
+
+    title = str(candidate.get("title") or "").strip()
+    if title:
+        return section_type, title.lower()
+    return None
+
+
+def _append_unique_text(parts: list[str], value: Any) -> None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" ;；|")
+    if text and text not in parts:
+        parts.append(text)
+
+
+def _merged_description(parts: list[str]) -> str:
+    return "；".join(part for part in parts if part).strip("；")
+
+
+def _coalesce_resume_entry_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge LLM-split sentences back into one experience/project entry."""
+    merged: list[dict[str, Any]] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+    descriptions_by_key: dict[tuple[str, str], list[str]] = {}
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        key = _candidate_merge_key(candidate)
+        if key is None:
+            merged.append(candidate)
+            continue
+
+        normalized = _candidate_normalized(candidate)
+        if key not in index_by_key:
+            index_by_key[key] = len(merged)
+            merged.append(candidate)
+            descriptions_by_key[key] = []
+            _append_unique_text(descriptions_by_key[key], normalized.get("description"))
+            content_json = candidate.get("content_json")
+            if isinstance(content_json, dict):
+                _append_unique_text(descriptions_by_key[key], content_json.get("bullet"))
+            continue
+
+        target = merged[index_by_key[key]]
+        target_normalized = _candidate_normalized(target)
+        parts = descriptions_by_key[key]
+        _append_unique_text(parts, target_normalized.get("description"))
+        _append_unique_text(parts, normalized.get("description"))
+        content_json = candidate.get("content_json")
+        if isinstance(content_json, dict):
+            _append_unique_text(parts, content_json.get("bullet"))
+
+        target_content_json = target.get("content_json")
+        if not isinstance(target_content_json, dict):
+            continue
+
+        description = _merged_description(parts)
+        target_normalized["description"] = description
+        target_content_json["normalized"] = target_normalized
+
+        field_values = target_content_json.get("field_values")
+        if isinstance(field_values, dict):
+            field_id = "project.description" if key[0] == "project" else "experience.description"
+            field_values[field_id] = description
+            target_content_json["field_values"] = field_values
+
+        target_content_json["bullet"] = description
+        target["content_json"] = target_content_json
+        target["confidence"] = max(float(target.get("confidence") or 0), float(candidate.get("confidence") or 0))
+
+    return merged
+
+
+def _structured_entry_type(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "work": "experience",
+        "work_experience": "experience",
+        "professional_experience": "experience",
+        "job": "experience",
+        "intern": "experience",
+        "internship": "experience",
+        "internship_experience": "experience",
+        "project_experience": "project",
+        "research": "project",
+        "research_experience": "project",
+        "education_background": "education",
+        "school": "education",
+        "skills": "skill",
+        "cert": "certificate",
+        "certification": "certificate",
+        "award": "custom",
+        "honor": "custom",
+        "summary": "custom",
+        "personal": "custom",
+    }
+    return aliases.get(raw, raw if raw in PROFILE_BUILTIN_SECTION_TYPES else "custom")
+
+
+def _structured_text(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _candidate_from_structured_resume_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+
+    section_type = _structured_entry_type(
+        entry.get("entry_type") or entry.get("section_type") or entry.get("type") or entry.get("category")
+    )
+    if isinstance(entry.get("content_json"), dict):
+        legacy_candidate = dict(entry)
+        legacy_candidate["section_type"] = section_type
+        return _normalize_candidate(section_type, legacy_candidate)
+
+    title = _structured_text(entry.get("title") or entry.get("name") or entry.get("organization"))
+    organization = _structured_text(entry.get("organization") or entry.get("company") or entry.get("school"))
+    role = _structured_text(entry.get("role") or entry.get("position") or entry.get("position_name"))
+    start_date = _structured_text(entry.get("start_date") or entry.get("startDate"))
+    end_date = _structured_text(entry.get("end_date") or entry.get("endDate"))
+    description = _structured_text(entry.get("description") or entry.get("details") or entry.get("achievements"))
+    confidence = entry.get("confidence", 0.72)
+
+    if not any([title, organization, role, description]):
+        return None
+
+    if section_type == "education":
+        return _normalize_candidate(
+            "education",
+            {
+                "section_type": "education",
+                "title": title or organization or "教育经历",
+                "content_json": {
+                    "school": organization or title,
+                    "degree": _structured_text(entry.get("degree")),
+                    "major": _structured_text(entry.get("major")),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "gpa": _structured_text(entry.get("gpa")),
+                    "description": description,
+                    "bullet": description or title or organization,
+                },
+                "confidence": confidence,
+            },
+        )
+
+    if section_type == "experience":
+        department = _structured_text(entry.get("department"))
+        return _normalize_candidate(
+            "experience",
+            {
+                "section_type": "experience",
+                "title": title or organization or "工作经历",
+                "content_json": {
+                    "company": organization or title,
+                    "position": role,
+                    "department": department,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "description": description,
+                    "bullet": description or " | ".join(part for part in [organization, role] if part),
+                },
+                "confidence": confidence,
+            },
+        )
+
+    if section_type == "project":
+        return _normalize_candidate(
+            "project",
+            {
+                "section_type": "project",
+                "title": title or "项目经历",
+                "content_json": {
+                    "name": title,
+                    "role": role,
+                    "url": _structured_text(entry.get("url") or entry.get("link")),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "description": description,
+                    "bullet": description or title,
+                },
+                "confidence": confidence,
+            },
+        )
+
+    if section_type == "skill":
+        skill_text = description or _structured_text(entry.get("items") or entry.get("skills")) or title
+        return _normalize_candidate(
+            "skill",
+            {
+                "section_type": "skill",
+                "title": title or "技能清单",
+                "content_json": {
+                    "category": title or "技能",
+                    "items": [skill_text] if skill_text else [],
+                    "bullet": skill_text,
+                },
+                "confidence": confidence,
+            },
+        )
+
+    if section_type == "certificate":
+        return _normalize_candidate(
+            "certificate",
+            {
+                "section_type": "certificate",
+                "title": title or "证书资质",
+                "content_json": {
+                    "name": title,
+                    "issuer": organization,
+                    "date": end_date or start_date,
+                    "url": _structured_text(entry.get("url") or entry.get("link")),
+                    "bullet": description or title,
+                },
+                "confidence": confidence,
+            },
+        )
+
+    return _normalize_candidate(
+        "custom",
+        {
+            "section_type": "custom",
+            "title": title or "个人经历",
+            "content_json": {
+                "subtitle": title or organization,
+                "description": description or " | ".join(part for part in [organization, role] if part),
+                "bullet": description or title or organization,
+            },
+            "confidence": confidence,
+        },
+    )
+
+
+def _candidates_from_structured_resume_payload(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_entries = parsed.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raw_entries = parsed.get("bullets")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raw_entries = parsed.get("bullet_candidates")
+    if not isinstance(raw_entries, list):
+        return []
+
+    candidates = [
+        candidate
+        for item in raw_entries[:16]
+        if isinstance(item, dict)
+        for candidate in [_candidate_from_structured_resume_entry(item)]
+        if candidate is not None
+    ]
+    return _coalesce_resume_entry_candidates(candidates)
+
+
+def _base_info_from_structured_resume_payload(parsed: dict[str, Any]) -> dict[str, str]:
+    raw = parsed.get("base_info")
+    if not isinstance(raw, dict):
+        return {}
+    aliases = {
+        "name": ["name", "full_name", "fullName"],
+        "phone": ["phone", "mobile", "telephone"],
+        "email": ["email", "mail"],
+        "current_city": ["current_city", "currentCity", "city", "location"],
+        "job_intention": ["job_intention", "jobIntention", "target_role", "targetRole"],
+        "summary": ["summary", "personal_summary", "personalSummary", "profile"],
+        "personal_summary": ["personal_summary", "personalSummary", "summary", "profile"],
+        "website": ["website", "personal_website", "personalWebsite"],
+        "github": ["github", "github_url", "githubUrl"],
+        "linkedin": ["linkedin", "linkedin_url", "linkedinUrl"],
+    }
+    out: dict[str, str] = {}
+    for target, keys in aliases.items():
+        for key in keys:
+            value = _structured_text(raw.get(key))
+            if value:
+                out[target] = value
+                break
+    return out
+
+
+async def _extract_resume_import_payload(resume_text: str) -> dict[str, Any]:
     prompt = (
         "你是求职档案结构化助手。从简历文本中抽取 3-12 条可入库的事实 bullet，输出严格JSON。\n"
         "JSON 格式: {\"bullets\": [{\"section_type\": string, \"title\": string, \"content_json\": object, \"confidence\": number}]}\n\n"
@@ -892,8 +1196,18 @@ async def _extract_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
     )
     prompt += (
         "\n\nIMPORTANT: The source may come from PDF text extraction. PDF visual line wraps are not separate resume bullets. "
+        "Return JSON with this shape whenever possible: "
+        "{\"base_info\":{\"name\":\"\",\"phone\":\"\",\"email\":\"\",\"current_city\":\"\",\"job_intention\":\"\",\"summary\":\"\"},"
+        "\"entries\":[{\"entry_type\":\"education|work|internship|project|skill|certificate|award|personal\","
+        "\"title\":\"\",\"organization\":\"\",\"department\":\"\",\"role\":\"\",\"start_date\":\"\",\"end_date\":\"\","
+        "\"description\":\"one complete textarea-ready description string\",\"items\":[],\"confidence\":0.0}]}. "
         "Merge wrapped lines that belong to the same sentence or responsibility. "
+        "Treat one company role, internship, or project as ONE candidate entry, with all of its sentence-level details inside content_json.description. "
+        "Do not split a single project into multiple candidates just because the PDF text has multiple visual lines. "
+        "The JSON key is still named bullets for API compatibility, but each item must represent a complete resume entry, not one sentence. "
+        "For the attached resume pattern, keep the China Telecom role as one work entry and its numbered AIGC/video items as project entries only when they have distinct project names. "
         "For experience/project description, use one string. Only insert newlines or bullet markers when the original text has explicit bullet points, numbering, or clearly separate achievements. "
+        "For skill entries, do not reduce the original skill paragraph into short keywords. Copy the original skill section wording into description; items may stay empty. "
         "Do not create a separate candidate or description item from each visual line. "
         "Keep Chinese text as valid UTF-8; never output mojibake or question marks for Chinese characters."
     )
@@ -914,23 +1228,132 @@ async def _extract_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
         parsed = None
 
     if not isinstance(parsed, dict):
-        return _fallback_resume_candidates(resume_text)
+        return {
+            "base_info": {},
+            "candidates": _coalesce_resume_entry_candidates(_fallback_resume_candidates(resume_text)),
+        }
 
-    raw_candidates = parsed.get("bullets")
-    if not isinstance(raw_candidates, list) or len(raw_candidates) == 0:
-        raw_candidates = parsed.get("bullet_candidates")
-
-    if not isinstance(raw_candidates, list) or len(raw_candidates) == 0:
-        return _fallback_resume_candidates(resume_text)
-
-    candidates = [
-        _normalize_candidate("general", item)
-        for item in raw_candidates[:12]
-        if isinstance(item, dict)
-    ]
+    candidates = _candidates_from_structured_resume_payload(parsed)
     if not candidates:
-        return _fallback_resume_candidates(resume_text)
-    return candidates
+        candidates = _coalesce_resume_entry_candidates(_fallback_resume_candidates(resume_text))
+    return {
+        "base_info": _base_info_from_structured_resume_payload(parsed),
+        "candidates": candidates,
+    }
+
+
+async def _extract_resume_candidates(resume_text: str) -> list[dict[str, Any]]:
+    payload = await _extract_resume_import_payload(resume_text)
+    candidates = payload.get("candidates")
+    return candidates if isinstance(candidates, list) else []
+
+
+def _normalize_resume_import_mode(value: str | None) -> str:
+    raw = str(value or "ai").strip().lower().replace("-", "_")
+    aliases = {
+        "llm": "ai",
+        "agent": "ai",
+        "smart": "ai",
+        "manual": "mechanical",
+        "classic": "mechanical",
+        "regex": "mechanical",
+        "rule": "mechanical",
+        "rules": "mechanical",
+        "original": "mechanical",
+        "legacy": "mechanical",
+    }
+    mode = aliases.get(raw, raw)
+    if mode not in RESUME_IMPORT_MODES:
+        raise HTTPException(status_code=400, detail="invalid parse_mode, use ai or mechanical")
+    return mode
+
+
+async def _extract_resume_import_payload_by_mode(resume_text: str, parse_mode: str) -> dict[str, Any]:
+    if parse_mode == "mechanical":
+        return {
+            "base_info": {},
+            "candidates": _coalesce_resume_entry_candidates(_fallback_resume_candidates(resume_text)),
+        }
+    return await _extract_resume_import_payload(resume_text)
+
+
+def _resume_import_memory_summary(
+    *,
+    filename: str,
+    parse_mode: str,
+    parsed_text: str,
+    base_info: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "kind": "resume_parse_memory",
+        "source": "resume_import",
+        "filename": filename,
+        "parse_mode": parse_mode,
+        "text_length": len(parsed_text),
+        "base_info": base_info,
+        "candidate_count": len(candidates),
+        "candidate_titles": [str(item.get("title") or "").strip() for item in candidates[:12] if isinstance(item, dict)],
+    }
+
+
+def _build_resume_import_agent_messages(
+    *,
+    filename: str,
+    parse_mode: str,
+    parsed_text: str,
+    base_info: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    target_role = str(base_info.get("job_intention") or "").strip()
+    target_city = str(base_info.get("current_city") or "").strip()
+    state = build_initial_agent_state(
+        resume_text=parsed_text,
+        target_role=target_role,
+        target_city=target_city,
+        job_goal="",
+        extracted_base_info=base_info,
+        resume_candidates=candidates,
+    )
+    mode_label = "AI 精准解析" if parse_mode == "ai" else "原版机械解析"
+    patch = normalize_profile_agent_patch(
+        {
+            "action": "propose_patch" if (base_info or candidates) else "ask_user",
+            "assistant_message": (
+                f"我已经用{mode_label}读完这份简历，并把解析结果同步成档案记忆。"
+                "你可以先确认写入，也可以直接问我哪段经历需要合并、补强或改写。"
+            ),
+            "base_info": base_info,
+            "target_roles": [target_role] if target_role else [],
+            "sections": candidates,
+            "next_question": "要不要我先检查哪些经历被拆错、哪些经历最该合并成一个描述框？",
+            "confidence": 0.78 if parse_mode == "ai" else 0.62,
+        }
+    )
+    messages_json = [
+        {
+            "kind": "profile_agent_start",
+            "agent": PROFILE_AGENT_TOPIC,
+            "source": "resume_import",
+            "filename": filename,
+            "parse_mode": parse_mode,
+            "resume_text_length": len(parsed_text),
+            "target_role": target_role,
+            "target_city": target_city,
+            "job_goal": "",
+        },
+        _resume_import_memory_summary(
+            filename=filename,
+            parse_mode=parse_mode,
+            parsed_text=parsed_text,
+            base_info=base_info,
+            candidates=candidates,
+        ),
+        {"kind": "profile_agent_state", "agent": PROFILE_AGENT_TOPIC, "state": state},
+        {"role": "assistant", "topic": PROFILE_AGENT_TOPIC, "content": patch["assistant_message"]},
+        {"kind": "profile_agent_patch", "agent": PROFILE_AGENT_TOPIC, "patch": patch, "applied": False},
+    ]
+    return messages_json, patch
 
 
 @router.get("/")
@@ -1608,7 +2031,12 @@ async def confirm_profile_bullet(data: ProfileChatConfirmRequest, db: AsyncSessi
 
 
 @router.post("/import-resume")
-async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def import_profile_resume(
+    file: UploadFile = File(...),
+    parse_mode: str = Query(default="ai"),
+    db: AsyncSession = Depends(get_db),
+):
+    normalized_parse_mode = _normalize_resume_import_mode(parse_mode)
     if not file.filename:
         raise HTTPException(status_code=400, detail="missing filename")
 
@@ -1631,8 +2059,24 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
 
     profile = await _get_or_create_default_profile(db)
     base_info = _extract_resume_base_info(parsed_text)
-    candidates = await _extract_resume_candidates(parsed_text)
+    import_payload = await _extract_resume_import_payload_by_mode(parsed_text, normalized_parse_mode)
+    llm_base_info = import_payload.get("base_info") if isinstance(import_payload, dict) else {}
+    if isinstance(llm_base_info, dict):
+        for key, value in llm_base_info.items():
+            text_value = str(value or "").strip()
+            if text_value and not str(base_info.get(key, "")).strip():
+                base_info[key] = text_value
+    candidates = import_payload.get("candidates") if isinstance(import_payload, dict) else []
+    if not isinstance(candidates, list):
+        candidates = _coalesce_resume_entry_candidates(_fallback_resume_candidates(parsed_text))
 
+    memory_summary = _resume_import_memory_summary(
+        filename=filename,
+        parse_mode=normalized_parse_mode,
+        parsed_text=parsed_text,
+        base_info=base_info,
+        candidates=candidates,
+    )
     session = ProfileChatSession(
         profile_id=profile.id,
         topic="general",
@@ -1647,8 +2091,10 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
                 "kind": "resume_import_meta",
                 "filename": filename,
                 "text_length": len(parsed_text),
+                "parse_mode": normalized_parse_mode,
                 "base_info": base_info,
             },
+            memory_summary,
             {
                 "kind": "bullet_candidates",
                 "topic": "general",
@@ -1658,8 +2104,24 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
         extracted_bullets_count=len(candidates),
     )
     db.add(session)
+    agent_messages_json, _agent_patch = _build_resume_import_agent_messages(
+        filename=filename,
+        parse_mode=normalized_parse_mode,
+        parsed_text=parsed_text,
+        base_info=base_info,
+        candidates=candidates,
+    )
+    agent_session = ProfileChatSession(
+        profile_id=profile.id,
+        topic=PROFILE_AGENT_TOPIC,
+        status="active",
+        messages_json=agent_messages_json,
+        extracted_bullets_count=len(candidates),
+    )
+    db.add(agent_session)
     await db.commit()
     await db.refresh(session)
+    await db.refresh(agent_session)
 
     bullets = [
         {
@@ -1672,7 +2134,9 @@ async def import_profile_resume(file: UploadFile = File(...), db: AsyncSession =
 
     return {
         "session_id": session.id,
+        "agent_session_id": agent_session.id,
         "filename": filename,
+        "parse_mode": normalized_parse_mode,
         "text_length": len(parsed_text),
         "base_info": base_info,
         "bullets": bullets,

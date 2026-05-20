@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, Card, CardBody, Input, Textarea } from "@nextui-org/react";
-import { ChevronDown, ChevronUp, Plus, Save, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Plus, Save, Trash2 } from "lucide-react";
 import RichTextEditor from "@/app/resume/components/RichTextEditor";
 import {
   type ResumeArchive,
@@ -67,6 +67,129 @@ function useSectionState(focusSection: string | undefined) {
 function collsapsedOrDefault(value: boolean | undefined): boolean {
   return value ?? false;
 }
+
+
+function DescriptionArrayEditor(props: {
+  label: string;
+  values: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const values = props.values.length > 0 ? props.values : [""];
+
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-semibold text-black/60">{props.label}</div>
+      {values.map((item, index) => (
+        <div key={`${props.label}-${index}`} className="flex items-center gap-2">
+          <Textarea
+            value={item}
+            minRows={2}
+            variant="bordered"
+            className="flex-1"
+            classNames={{
+              inputWrapper: "border border-black/15 bg-[var(--surface)] shadow-[1px_1px_0_0_rgba(18,18,18,0.08)]",
+            }}
+            onValueChange={(nextValue) => {
+              const next = values.slice();
+              next[index] = nextValue;
+              props.onChange(next);
+            }}
+          />
+          <div className="flex shrink-0 items-center gap-1 self-center">
+            <Button
+              size="sm"
+              isIconOnly
+              aria-label="新增描述"
+              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
+              onPress={() => {
+                const next = values.slice();
+                next.splice(index + 1, 0, "");
+                props.onChange(next);
+              }}
+            >
+              <Plus size={14} />
+            </Button>
+            <Button
+              size="sm"
+              isIconOnly
+              aria-label="上移描述"
+              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
+              isDisabled={index === 0}
+              onPress={() => {
+                if (index === 0) return;
+                const next = values.slice();
+                const current = next[index];
+                next[index] = next[index - 1];
+                next[index - 1] = current;
+                props.onChange(next);
+              }}
+            >
+              <ArrowUp size={14} />
+            </Button>
+            <Button
+              size="sm"
+              isIconOnly
+              aria-label="下移描述"
+              className="bauhaus-button bauhaus-button-outline !h-8 !min-w-8 !w-8 !px-0 !py-0"
+              isDisabled={index >= values.length - 1}
+              onPress={() => {
+                if (index >= values.length - 1) return;
+                const next = values.slice();
+                const current = next[index];
+                next[index] = next[index + 1];
+                next[index + 1] = current;
+                props.onChange(next);
+              }}
+            >
+              <ArrowDown size={14} />
+            </Button>
+            <Button
+              size="sm"
+              isIconOnly
+              aria-label="删除描述"
+              className="bauhaus-button bauhaus-button-red !h-8 !min-w-8 !w-8 !px-0 !py-0"
+              onPress={() => {
+                if (values.length <= 1) {
+                  props.onChange([""]);
+                  return;
+                }
+                const next = values.slice();
+                next.splice(index, 1);
+                props.onChange(next);
+              }}
+            >
+              <Trash2 size={14} />
+            </Button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SingleDescriptionEditor(props: {
+  label: string;
+  values: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const value = props.values.filter((item) => item.trim()).join("\n");
+
+  return (
+    <Textarea
+      label={props.label}
+      value={value}
+      minRows={5}
+      variant="bordered"
+      classNames={{
+        inputWrapper: "border border-black/15 bg-[var(--surface)] shadow-[1px_1px_0_0_rgba(18,18,18,0.08)]",
+      }}
+      onValueChange={(nextValue) => {
+        props.onChange([nextValue]);
+      }}
+    />
+  );
+}
+
 
 function SectionFrame(props: {
   sectionKey: string;
@@ -548,7 +671,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="workExperiences"
         title="工作经历"
-        description="支持多条工作描述。" count={value.workExperiences.length}
+        description="一个工作经历对应一个完整描述框。" count={value.workExperiences.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "workExperiences"}
         missing={missingSet.has("workExperiences")}
         collapsed={sectionState.isCollapsed("workExperiences")}
@@ -571,7 +694,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="internshipExperiences"
         title="实习经历"
-        description="与工作经历分开维护。" count={value.internshipExperiences.length}
+        description="一个实习经历对应一个完整描述框。" count={value.internshipExperiences.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "internshipExperiences"}
         missing={missingSet.has("internshipExperiences")}
         collapsed={sectionState.isCollapsed("internshipExperiences")}
@@ -594,7 +717,7 @@ export default function ResumeArchiveEditor(props: ResumeArchiveEditorProps) {
       <ListSection
         sectionKey="projects"
         title="项目经历"
-        description="项目描述按条维护。" count={value.projects.length}
+        description="一个项目经历对应一个完整描述框。" count={value.projects.length}
         focused={normalizeFocusSectionKey(props.focusSection) === "projects"}
         missing={missingSet.has("projects")}
         collapsed={sectionState.isCollapsed("projects")}

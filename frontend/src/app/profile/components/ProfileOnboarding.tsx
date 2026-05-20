@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Button, Chip, Input, Textarea } from "@nextui-org/react";
+import { Button, Chip, Input, Spinner, Textarea } from "@nextui-org/react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,6 +11,7 @@ import {
   FileText,
   GraduationCap,
   Sparkles,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -22,7 +23,13 @@ import {
   normalizePersonalArchiveFromProfile,
   personalArchiveFactories,
 } from "@/lib/personalArchive";
-import { updateProfileData, type ProfileData, type ProfileImportResult } from "@/lib/hooks";
+import {
+  importProfileResume,
+  updateProfileData,
+  type ProfileData,
+  type ProfileImportResult,
+  type ResumeImportParseMode,
+} from "@/lib/hooks";
 import AIImportModal from "./AIImportModal";
 
 interface ProfileOnboardingProps {
@@ -262,9 +269,12 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
   });
   const [customRole, setCustomRole] = useState("");
   const [imported, setImported] = useState<ProfileImportResult | null>(null);
+  const [importing, setImporting] = useState<ResumeImportParseMode | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [aiImportOpen, setAiImportOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const importModeRef = useRef<ResumeImportParseMode>("ai");
 
   const previewArchive = useMemo(() => buildOnboardingArchive(form, imported, profile), [form, imported, profile]);
   const missing = useMemo(() => getDeliverableMissing(previewArchive), [previewArchive]);
@@ -319,6 +329,48 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
       currentCity: prev.currentCity || clean(base.current_city),
       summary: prev.summary || clean(base.summary || base.personal_summary),
     }));
+  };
+
+  const openResumeImport = (parseMode: ResumeImportParseMode) => {
+    importModeRef.current = parseMode;
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    const parseMode = importModeRef.current;
+    event.target.value = "";
+    if (!file) return;
+    setImporting(parseMode);
+    setError("");
+    try {
+      const result = await importProfileResume(file, parseMode);
+      setImported(result);
+      const base = result.base_info || {};
+      setForm((prev) => ({
+        ...prev,
+        name: prev.name || clean(base.name),
+        phone: prev.phone || clean(base.phone),
+        email: prev.email || clean(base.email),
+        currentCity: prev.currentCity || clean(base.current_city),
+        summary: prev.summary || clean(base.summary || base.personal_summary),
+      }));
+      if (typeof window !== "undefined" && result.agent_session_id) {
+        window.dispatchEvent(
+          new CustomEvent("offeru:open-profile-agent", {
+            detail: {
+              sessionId: result.agent_session_id,
+              source: "resume_import",
+              parseMode,
+            },
+          })
+        );
+      }
+    } catch (err: any) {
+      setError(err.message || "导入失败，请改用手填经历。");
+    } finally {
+      setImporting(null);
+    }
   };
 
   const handleFinish = async () => {
@@ -425,9 +477,35 @@ export function ProfileOnboarding({ currentArchive, profile, onComplete, onClose
 
               {step === 2 && (
                 <StepFrame key="experience" direction={direction} icon={FileText} title="导入简历，或者先手填三段经历" subtitle="新人没有完整简历也没关系，先把可投递素材写进档案。">
-                  <Button className="w-full justify-center" variant="bordered" startContent={<Sparkles size={16} />} onPress={() => setAiImportOpen(true)}>
-                    {imported ? `已导入 ${imported.filename === "ai-import" ? "AI 解析结果" : imported.filename}` : "AI 导入简历"}
-                  </Button>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Button
+                      className="w-full justify-center"
+                      color="primary"
+                      startContent={importing === "ai" ? <Spinner size="sm" /> : <Sparkles size={16} />}
+                      onPress={() => openResumeImport("ai")}
+                      isDisabled={Boolean(importing)}
+                    >
+                      {importing === "ai" ? "AI 正在精准解析..." : imported?.parse_mode === "ai" ? `AI 已导入 ${imported.filename}` : "AI 精准解析简历"}
+                    </Button>
+                    <Button
+                      className="w-full justify-center"
+                      variant="bordered"
+                      startContent={importing === "mechanical" ? <Spinner size="sm" /> : <Upload size={16} />}
+                      onPress={() => openResumeImport("mechanical")}
+                      isDisabled={Boolean(importing)}
+                    >
+                      {importing === "mechanical"
+                        ? "机械解析中..."
+                        : imported?.parse_mode === "mechanical"
+                          ? `机械已导入 ${imported.filename}`
+                          : "原版机械解析"}
+                    </Button>
+                  </div>
+                  <div className="mt-2">
+                    <Button className="w-full justify-center" variant="bordered" startContent={<Sparkles size={16} />} onPress={() => setAiImportOpen(true)}>
+                      {imported ? `已导入 ${imported.filename === "ai-import" ? "AI 解析结果" : imported.filename}` : "AI 对话导入简历"}
+                    </Button>
+                  </div>
                   <AIImportModal
                     open={aiImportOpen}
                     onClose={() => setAiImportOpen(false)}

@@ -387,10 +387,11 @@ export const profileApi = {
     return res;
   },
 
-  importResume: async (file: File) => {
+  importResume: async (file: File, parseMode: "ai" | "mechanical" = "ai") => {
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch(`${API_BASE}/api/profile/import-resume`, {
+    const params = new URLSearchParams({ parse_mode: parseMode });
+    const res = await fetch(`${API_BASE}/api/profile/import-resume?${params.toString()}`, {
       method: "POST",
       body: formData,
     });
