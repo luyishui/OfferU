@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import Job, Pool, Batch
+from app.ops import execute_operation
 from app.services.campus_detector import detect_campus
 from pydantic import BaseModel, Field
 
@@ -320,68 +321,12 @@ async def list_batches(
 @router.patch("/batch-update")
 async def patch_jobs_batch(data: JobBatchPatchRequest, db: AsyncSession = Depends(get_db)):
     """批量更新岗位分拣状态/池归属"""
-    if not data.job_ids:
-        raise HTTPException(status_code=400, detail="job_ids is required")
-
-    if len(data.job_ids) > 500:
-        raise HTTPException(status_code=400, detail="job_ids exceeds 500")
-
-    if data.triage_status is None and data.pool_id is None and not data.clear_pool:
-        raise HTTPException(status_code=400, detail="no update fields provided")
-
-    triage_status = _to_internal_status(data.triage_status) if data.triage_status else None
-    if triage_status and triage_status not in TRIAGE_STATUSES:
-        raise HTTPException(status_code=400, detail="invalid triage_status")
-
-    if data.pool_id is not None and data.clear_pool:
-        raise HTTPException(status_code=400, detail="pool_id and clear_pool are mutually exclusive")
-
-    if data.pool_id is not None and triage_status and triage_status != "picked":
-        raise HTTPException(status_code=400, detail="pool_id can only be used with triage_status=picked")
-
-    pool = None
-    if data.pool_id is not None:
-        pool = (
-            await db.execute(select(Pool).where(Pool.id == data.pool_id))
-        ).scalar_one_or_none()
-        if not pool:
-            raise HTTPException(status_code=404, detail="Pool not found")
-        if pool.scope != "picked":
-            raise HTTPException(status_code=400, detail="only picked scope pool can be assigned")
-
-    result = await db.execute(select(Job).where(Job.id.in_(data.job_ids)))
-    jobs = result.scalars().all()
-
-    found_ids = {job.id for job in jobs}
-    missing_ids = sorted(set(data.job_ids) - found_ids)
-    if missing_ids:
-        raise HTTPException(
-            status_code=404,
-            detail=f"some job_ids were not found: {missing_ids}",
-        )
-
-    updated = 0
-    for job in jobs:
-        if triage_status:
-            job.triage_status = triage_status
-            if triage_status != "picked":
-                job.pool_id = None
-            elif data.pool_id is None and not data.clear_pool:
-                # 从未筛选流转到已筛选时，默认清空原池，避免跨分区残留关联
-                job.pool_id = None
-
-        if data.pool_id is not None:
-            job.pool_id = data.pool_id
-            if not data.triage_status:
-                job.triage_status = "picked"
-
-        if data.clear_pool:
-            job.pool_id = None
-
-        updated += 1
-
-    await db.commit()
-    return {"updated": updated, "pool_name": pool.name if pool else None}
+    result = await execute_operation(
+        "batch_update_jobs",
+        data.model_dump(),
+        surface="ui",
+    )
+    return _operation_output_or_error(result)
 
 
 @router.delete("/batch-delete")
@@ -420,48 +365,10 @@ async def delete_jobs_batch(data: JobBatchDeleteRequest, db: AsyncSession = Depe
 @router.patch("/{job_id}")
 async def patch_job(job_id: int, data: JobPatchRequest, db: AsyncSession = Depends(get_db)):
     """更新单个岗位的分拣状态与池归属"""
-    if data.triage_status is None and data.pool_id is None and not data.clear_pool:
-        raise HTTPException(status_code=400, detail="no update fields provided")
-
-    triage_status = _to_internal_status(data.triage_status) if data.triage_status else None
-    if triage_status and triage_status not in TRIAGE_STATUSES:
-        raise HTTPException(status_code=400, detail="invalid triage_status")
-
-    clear_pool = data.clear_pool or data.pool_id == 0
-    pool_id = None if data.pool_id == 0 else data.pool_id
-
-    if pool_id is not None and clear_pool:
-        raise HTTPException(status_code=400, detail="pool_id and clear_pool are mutually exclusive")
-
-    if pool_id is not None and triage_status and triage_status != "picked":
-        raise HTTPException(status_code=400, detail="pool_id can only be used with triage_status=picked")
-
-    result = await db.execute(select(Job).where(Job.id == job_id))
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    if triage_status is not None:
-        job.triage_status = triage_status
-        if triage_status != "picked":
-            job.pool_id = None
-
-    if pool_id is not None:
-        pool = (await db.execute(select(Pool).where(Pool.id == pool_id))).scalar_one_or_none()
-        if not pool:
-            raise HTTPException(status_code=404, detail="Pool not found")
-        if pool.scope != "picked":
-            raise HTTPException(status_code=400, detail="only picked scope pool can be assigned")
-        job.pool_id = pool_id
-        if triage_status is None:
-            job.triage_status = "picked"
-
-    if clear_pool:
-        job.pool_id = None
-
-    await db.commit()
-    await db.refresh(job)
-    return _job_to_dict(job)
+    payload = data.model_dump()
+    payload["job_id"] = job_id
+    result = await execute_operation("update_job", payload, surface="ui")
+    return _operation_output_or_error(result)
 
 
 @router.get("/stats")
@@ -777,3 +684,13 @@ def _job_to_dict(job: Job) -> dict:
         "batch_id": job.batch_id,
         "created_at": str(job.created_at),
     }
+
+
+def _operation_output_or_error(result: dict) -> dict:
+    if result.get("ok"):
+        return result.get("outputs") or {}
+    detail = "; ".join(result.get("errors") or ["operation failed"])
+    status_code = 404 if "not found" in detail.lower() else 400
+    if "already exists" in detail.lower():
+        status_code = 409
+    raise HTTPException(status_code=status_code, detail=detail)

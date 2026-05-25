@@ -556,7 +556,7 @@ async def job_stats() -> dict:
         counts: dict[str, int] = {}
         for st in ("unscreened", "screened", "ignored"):
             cnt = (await db.execute(
-                select(func.count(Job.id)).where(Job.triage_status == st)
+                select(func.count(Job.id)).where(Job.triage_status.in_(_status_filter_values(st)))
             )).scalar() or 0
             counts[st] = cnt
 
@@ -571,6 +571,27 @@ async def job_stats() -> dict:
             "total": sum(counts.values()),
             "sources": sources,
         }
+
+
+@mcp.tool()
+async def run_operation(
+    operation: str,
+    args: Optional[dict] = None,
+    dry_run: bool = True,
+) -> dict:
+    """通过统一 Operation Registry 执行任意 OfferU 原子操作。
+
+    默认 dry_run=True，用于保护 MCP 客户端不会静默触发写入、LLM 或外部副作用。
+    适用场景：Claude Code/Codex 等 Agent 发现操作后，通过同一 action model 调用产品能力。
+    """
+    from app.ops import execute_operation
+
+    return await execute_operation(
+        operation,
+        args or {},
+        dry_run=dry_run,
+        surface="mcp",
+    )
 
 
 # =============================================

@@ -8,144 +8,65 @@
 from __future__ import annotations
 
 import json
-import traceback
-from typing import Optional
+import time
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.agents.llm import chat_completion, extract_json
-from app.database import get_db
-from app.mcp_server import (
-    get_profile,
-    list_pools,
-    list_jobs,
-    get_job,
-    triage_job,
-    batch_triage,
-    generate_resume,
-    list_resumes,
-    get_resume,
-    list_applications,
-    create_application,
-    generate_cover_letter,
-    job_stats,
-)
+from app.ops import OPERATIONS, build_tools_description, execute_operation
 
 router = APIRouter()
+PROPOSAL_TTL_SECONDS = 15 * 60
+_PROPOSALS: dict[str, dict] = {}
 
 # ---- MCP Tool Registry (name → callable + schema) ----
 
 TOOL_REGISTRY: dict[str, dict] = {
-    "get_profile": {
-        "fn": get_profile,
-        "description": "获取用户个人资料（基本信息、目标岗位、经历统计）",
-        "parameters": {},
-    },
-    "list_pools": {
-        "fn": list_pools,
-        "description": "获取岗位池列表",
-        "parameters": {},
-    },
-    "list_jobs": {
-        "fn": list_jobs,
-        "description": "分页浏览岗位列表，支持筛选",
-        "parameters": {
-            "triage_status": "str? (unscreened|screened|ignored)",
-            "pool_id": "int?",
-            "keyword": "str?",
-            "page": "int=1",
-            "page_size": "int=20",
-        },
-    },
-    "get_job": {
-        "fn": get_job,
-        "description": "查看单个岗位详情（含完整岗位描述JD）",
-        "parameters": {"job_id": "int"},
-    },
-    "triage_job": {
-        "fn": triage_job,
-        "description": "将岗位分拣为 screened/ignored，可分配到池",
-        "parameters": {"job_id": "int", "status": "str", "pool_id": "int?"},
-    },
-    "batch_triage": {
-        "fn": batch_triage,
-        "description": "批量分拣多个岗位",
-        "parameters": {"job_ids": "list[int]", "status": "str", "pool_id": "int?"},
-    },
-    "generate_resume": {
-        "fn": generate_resume,
-        "description": "为单个岗位AI生成定制简历",
-        "parameters": {"job_id": "int", "reference_resume_id": "int?"},
-    },
-    "list_resumes": {
-        "fn": list_resumes,
-        "description": "查看所有简历列表（含AI溯源标签）",
-        "parameters": {},
-    },
-    "get_resume": {
-        "fn": get_resume,
-        "description": "查看简历完整内容",
-        "parameters": {"resume_id": "int"},
-    },
-    "list_applications": {
-        "fn": list_applications,
-        "description": "查看投递记录列表",
-        "parameters": {"status": "str?", "page": "int=1"},
-    },
-    "create_application": {
-        "fn": create_application,
-        "description": "为岗位创建投递记录",
-        "parameters": {"job_id": "int", "notes": "str?"},
-    },
-    "generate_cover_letter": {
-        "fn": generate_cover_letter,
-        "description": "为岗位和简历AI生成求职信",
-        "parameters": {"job_id": "int", "resume_id": "int"},
-    },
-    "job_stats": {
-        "fn": job_stats,
-        "description": "获取岗位统计数据",
-        "parameters": {},
-    },
+    name: {
+        "fn": operation.fn,
+        "description": operation.description,
+        "parameters": operation.parameters,
+        "side_effects": operation.side_effects,
+    }
+    for name, operation in OPERATIONS.items()
 }
 
 # ---- Build Tool descriptions for LLM system prompt ----
 
 def _build_tools_description() -> str:
-    lines = []
-    for name, info in TOOL_REGISTRY.items():
-        params = info["parameters"]
-        param_str = ", ".join(f"{k}: {v}" for k, v in params.items()) if params else "无参数"
-        lines.append(f"- {name}({param_str}): {info['description']}")
-    return "\n".join(lines)
+    return build_tools_description()
 
 
-SYSTEM_PROMPT = f"""你是 OfferU AI 助手，帮助中国文科生校招求职。你可以调用以下工具完成用户请求：
+SYSTEM_PROMPT = f"""你是 OfferU 内置求职操作 Agent，目标是像高级专家用户一样通过原子工具控制 OfferU。
 
+可用原子工具：
 {_build_tools_description()}
 
-工作流程：
-1. 理解用户意图
-2. 决定需要调用哪些工具（可以多步）
-3. 返回 JSON 格式的工具调用指令
+操作原则：
+1. 先判断用户目标属于读取、批量筛选、定制简历、投递待办、上下文接管还是普通问答。
+2. 复杂目标优先调用 agent_playbook 或 workflow_plan 获取操作契约和命令/步骤计划，不要凭空猜流程。
+3. 单次工具调用只做一个原子操作；多步任务使用 multi_tool 编排多个原子工具。
+4. 读操作可以直接执行；带 write、llm、external 副作用的工具会被系统强制 dry-run，并返回 proposal_id 等待用户确认。
+5. 不自动提交站外申请，不自动发送邮件或站外消息，只生成草稿、建议、待办和可确认预案。
+6. 批量工作流必须先读取 Profile、岗位列表或当前上下文，再基于返回结果选择具体 job_ids、job_id、resume_id。
+7. 如果缺少真实 ID，不要编造；先调用读取工具获取候选项，或回复用户需要选择哪一项。
 
-如果需要调用工具，返回：
-{{"action": "tool_call", "tool": "工具名", "args": {{参数字典}}}}
+推荐工作流：
+- 今日概览：job_stats → list_pools → list_jobs
+- 批量筛选：get_profile → list_jobs → batch_update_jobs(dry-run)
+- 定制简历：get_profile → get_job → list_resumes → generate_resume(dry-run)
+- 投递待办：get_job → generate_resume(dry-run) → generate_cover_letter(dry-run) → create_application(dry-run)
+- 当前页面接管：get_current_view → 根据 selection/filters 继续操作
 
-如果需要连续调用多个工具，返回：
-{{"action": "multi_tool", "calls": [{{"tool": "工具名1", "args": {{...}}}}, {{"tool": "工具名2", "args": {{...}}}}]}}
+返回格式只能是合法 JSON：
+- 单工具：{{"action": "tool_call", "tool": "工具名", "args": {{参数字典}}}}
+- 多工具：{{"action": "multi_tool", "calls": [{{"tool": "工具名1", "args": {{...}}}}, {{"tool": "工具名2", "args": {{...}}}}]}}
+- 直接回答：{{"action": "reply", "message": "中文回答"}}
 
-如果可以直接回答（不需要工具），返回：
-{{"action": "reply", "message": "你的回答"}}
-
-注意：
-- 始终返回合法 JSON
-- 参数类型要匹配（int 不要传 string）
-- 如果用户要求模糊，先用查询工具获取信息再行动
-- 回复使用中文，语气亲切自然"""
+参数必须匹配 schema。回复必须使用中文，清楚说明已执行的读取结果、需要用户确认的预案、以及下一步可选动作。"""
 
 
 class ChatMessage(BaseModel):
@@ -155,6 +76,22 @@ class ChatMessage(BaseModel):
 
 class AgentChatRequest(BaseModel):
     messages: list[ChatMessage]
+
+
+class AgentConfirmRequest(BaseModel):
+    proposal_id: str
+
+
+class AgentContextRequest(BaseModel):
+    scope: str = "default"
+    route: str = ""
+    title: str = ""
+    entity_type: str = ""
+    entity_id: str = ""
+    selection: dict = Field(default_factory=dict)
+    filters: dict = Field(default_factory=dict)
+    context: dict = Field(default_factory=dict)
+    updated_by: str = "ui"
 
 
 @router.post("/chat")
@@ -256,16 +193,94 @@ async def agent_chat(body: AgentChatRequest):
     return EventSourceResponse(event_generator())
 
 
+@router.post("/confirm")
+async def confirm_agent_operation(body: AgentConfirmRequest) -> dict:
+    """执行 Web Agent 生成的副作用操作预案。"""
+    _prune_expired_proposals()
+    proposal = _PROPOSALS.pop(body.proposal_id, None)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal not found or expired")
+
+    result = await execute_operation(
+        proposal["tool"],
+        proposal["args"],
+        dry_run=False,
+        surface="web_agent_confirm",
+    )
+    result["proposal_id"] = body.proposal_id
+    result["confirmed"] = True
+    return result
+
+
+@router.get("/context")
+async def get_agent_context(scope: str = "default") -> dict:
+    """读取 UI 与 Agent 共享的当前工作区上下文。"""
+    return await execute_operation(
+        "get_current_view",
+        {"scope": scope},
+        surface="ui",
+    )
+
+
+@router.put("/context")
+async def set_agent_context(body: AgentContextRequest) -> dict:
+    """写入 UI 与 Agent 共享的当前工作区上下文。"""
+    return await execute_operation(
+        "set_current_view",
+        body.model_dump(),
+        surface="ui",
+    )
+
+
+@router.delete("/context")
+async def clear_agent_context(scope: str = "default") -> dict:
+    """清空 UI 与 Agent 共享的当前工作区上下文。"""
+    return await execute_operation(
+        "clear_current_view",
+        {"scope": scope},
+        surface="ui",
+    )
+
+
 async def _execute_tool(tool_name: str, args: dict) -> dict:
     """执行 MCP Tool"""
     if tool_name not in TOOL_REGISTRY:
         return {"error": f"未知工具: {tool_name}"}
 
-    fn = TOOL_REGISTRY[tool_name]["fn"]
     try:
         # 过滤掉 None 值参数
         clean_args = {k: v for k, v in args.items() if v is not None}
-        result = await fn(**clean_args)
+        side_effects = set(TOOL_REGISTRY[tool_name].get("side_effects", ()))
+        dry_run = bool(side_effects.intersection({"write", "llm", "external"}))
+        result = await execute_operation(tool_name, clean_args, dry_run=dry_run, surface="web_agent")
+        if dry_run:
+            proposal_id = _store_proposal(tool_name, clean_args, tuple(side_effects))
+            result["proposal_id"] = proposal_id
+            result["requires_confirmation"] = True
+            result["confirmation_hint"] = "该操作包含副作用，Web Agent 已强制 dry-run；确认后调用 POST /api/agent/confirm 执行。"
         return result
     except Exception as e:
         return {"error": str(e)}
+
+
+def _store_proposal(tool_name: str, args: dict, side_effects: tuple[str, ...]) -> str:
+    _prune_expired_proposals()
+    proposal_id = uuid4().hex
+    _PROPOSALS[proposal_id] = {
+        "tool": tool_name,
+        "args": args,
+        "side_effects": list(side_effects),
+        "created_at": time.time(),
+    }
+    return proposal_id
+
+
+def _prune_expired_proposals() -> None:
+    now = time.time()
+    expired = [
+        proposal_id
+        for proposal_id, proposal in _PROPOSALS.items()
+        if now - float(proposal.get("created_at", 0)) > PROPOSAL_TTL_SECONDS
+    ]
+    for proposal_id in expired:
+        _PROPOSALS.pop(proposal_id, None)

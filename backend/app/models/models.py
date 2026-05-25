@@ -379,6 +379,48 @@ class Application(Base):
     )
 
 
+class OperationAuditLog(Base):
+    """统一操作审计日志：记录 UI/Agent/CLI/MCP 通过 action model 执行的动作。"""
+
+    __tablename__ = "operation_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    operation: Mapped[str] = mapped_column(String(120), index=True)
+    operation_version: Mapped[str] = mapped_column(String(40), default="")
+    surface: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    side_effects: Mapped[list] = mapped_column(JSON, default=list)
+    inputs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    outputs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    errors_json: Mapped[list] = mapped_column(JSON, default=list)
+    elapsed_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class AgentWorkspaceState(Base):
+    """Agent 与 UI 共享的当前工作区上下文。"""
+
+    __tablename__ = "agent_workspace_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(80), default="default", unique=True, index=True)
+    route: Mapped[str] = mapped_column(String(300), default="")
+    title: Mapped[str] = mapped_column(String(300), default="")
+    entity_type: Mapped[str] = mapped_column(String(80), default="")
+    entity_id: Mapped[str] = mapped_column(String(120), default="")
+    selection_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    filters_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    context_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[str] = mapped_column(String(80), default="unknown")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), index=True
+    )
+
+
 class ApplicationWorkspaceSettings(Base):
     """投递管理模块全局显示与行为设置"""
     __tablename__ = "application_workspace_settings"

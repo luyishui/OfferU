@@ -89,10 +89,16 @@
 - **生成逻辑**：Profile Bullet 召回 → JD 关键词匹配 → STAR 改写 → 保存为 Resume
 - **溯源标记**：每份简历标注"基于 腾讯-内容运营 生成"，可追溯来源
 
-### 🤖 MCP Server + AI Agent（13 个工具）
+### 🤖 MCP Server + CLI-first Operations（22+ 个原子操作）
 - 内置 MCP Server（FastMCP Streamable HTTP），支持外部 AI Agent 调用
+- 新增 CLI-first 原子操作层：Web Agent、MCP、CLI 共享同一套 Operation Registry
+- CC/Claude Code 可直接调用：`python -m app.cli manifest --pretty`、`python -m app.cli ops --pretty`、`python -m app.cli run list_jobs --arg page_size=5 --pretty`
+- 22+ 个原子操作：档案查看/岗位统计/分拣操作/岗位池管理/共享上下文/审计日志/简历生成/投递记录/求职信草稿等
+- 支持 `--input args.json` 传入复杂参数文件，`--arg key=value` 可覆盖文件参数，适合 PowerShell 与 Agent 编排
+- 支持全 API 控制面发现与受控调用：`python -m app.cli routes --pretty`、`python -m app.cli api GET /api/health --pretty`
+- 非 GET API 默认只返回执行预案；必须显式追加 `--execute` 才会调用写入/删除/LLM/外部副作用接口
+- CLI 输出稳定 JSON，写操作支持 `--dry-run`，方便 Agent 安全编排多步任务
 - Web Agent Console：对话式操作全系统（"帮我看看哪些岗位适合我"）
-- 13 个 MCP Tools：档案查看/岗位统计/分拣操作/简历生成/池管理等
 - LLM 自主决策调用工具链，多轮推理 + Tool Use
 
 ### 🔍 多平台岗位采集
