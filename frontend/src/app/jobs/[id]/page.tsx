@@ -163,6 +163,17 @@ export default function JobDetailPage() {
         </div>
       </section>
 
+      {job.user_notes && (
+        <Card className="bauhaus-panel rounded-none bg-white shadow-none">
+          <CardBody className="space-y-3 p-5">
+            <p className="bauhaus-label text-black/55">筛选备注</p>
+            <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-black/72">
+              {job.user_notes}
+            </p>
+          </CardBody>
+        </Card>
+      )}
+
       {job.summary && (
         <Card className="bauhaus-panel rounded-none bg-white shadow-none">
           <CardBody className="p-5">

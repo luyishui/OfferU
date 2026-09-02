@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # LLM API 全局超时（秒），防止请求挂起
     llm_timeout: int = 60
 
+    # ---- Agent runtime ----
+    llm_context_window: int = 128000
+    agent_reserve_tokens: int = 16384
+    agent_keep_recent_tokens: int = 20000
+    agent_soft_loop_limit: int = 10
+    agent_hard_loop_limit: int = 15
+    agent_tool_failure_fuse: int = 3
+    agent_turn_timeout: int = 300
+
     # ---- 安全 ----
     secret_key: str = "change-me-in-production"
     cors_origins: str = (

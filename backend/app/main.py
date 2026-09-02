@@ -5,8 +5,10 @@
 # 职责：注册路由、CORS、生命周期事件
 # =============================================
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
+from contextlib import suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +16,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
+from app.operator.continuation_worker import (
+    run_continuation_recovery_worker,
+    run_plan_group_execution_recovery_worker,
+)
 try:
     from app.mcp_server import HAS_MCP_SERVER, mcp as mcp_server
     from app.routes import agent as agent_route
@@ -31,11 +37,29 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库表与 MCP 会话管理器。"""
     await init_db()
-    if _HAS_MCP and mcp_server is not None:
-        async with mcp_server.session_manager.run():
+    continuation_stop = asyncio.Event()
+    continuation_task = asyncio.create_task(
+        run_continuation_recovery_worker(continuation_stop),
+        name="proposal-continuation-recovery",
+    )
+    plan_group_task = asyncio.create_task(
+        run_plan_group_execution_recovery_worker(continuation_stop),
+        name="plan-group-execution-recovery",
+    )
+    try:
+        if _HAS_MCP and mcp_server is not None:
+            async with mcp_server.session_manager.run():
+                yield
+        else:
             yield
-    else:
-        yield
+    finally:
+        continuation_stop.set()
+        continuation_task.cancel()
+        plan_group_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await continuation_task
+        with suppress(asyncio.CancelledError):
+            await plan_group_task
 
 
 app = FastAPI(

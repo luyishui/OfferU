@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -150,6 +151,27 @@ PROFILE_BUILTIN_SECTION_TYPES = set(PROFILE_BUILTIN_CATEGORY_DEFINITIONS.keys())
 
 LEGACY_SECTION_TYPE_ALIASES: dict[str, str] = {
     "internship": "experience",
+    "internship_experience": "experience",
+    "work_experience": "experience",
+    "workexperience": "experience",
+    "campus_activity": "experience",
+    "campusactivity": "experience",
+    "school_activity": "experience",
+    "activity": "experience",
+    "activity_experience": "experience",
+    "volunteer": "experience",
+    "volunteer_experience": "experience",
+    "工作经历": "experience",
+    "实习经历": "experience",
+    "校园活动": "experience",
+    "校园经历": "experience",
+    "活动经历": "experience",
+    "志愿经历": "experience",
+    "志愿服务": "experience",
+    "社会实践": "experience",
+    "实践经历": "experience",
+    "project_experience": "project",
+    "项目经历": "project",
     "honor": "skill",
     "language": "skill",
 }
@@ -327,6 +349,9 @@ def canonicalize_profile_content(
             field_values[field_def["id"]] = value
 
         bullet = _as_str(raw.get("bullet"))
+        if bullet and "description" in fields and not normalized.get("description"):
+            normalized["description"] = bullet
+            field_values[fields["description"]["id"]] = bullet
         if not bullet:
             if category_key == "education":
                 bullet = " | ".join(
@@ -403,6 +428,8 @@ def canonicalize_profile_content(
     )
 
     bullet = _as_str(raw.get("bullet"))
+    if bullet and not description:
+        description = bullet
     if not bullet:
         bullet = " | ".join([part for part in [subtitle, description] if part])
 
@@ -443,6 +470,91 @@ def canonicalize_profile_section_payload(
         category_label=resolved_label,
     )
     return category_key, resolved_label, is_custom, canonical
+
+
+def coerce_profile_section_content_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {"bullet": text}
+        if isinstance(parsed, dict):
+            return dict(parsed)
+        if isinstance(parsed, list):
+            return {"items": parsed, "bullet": "、".join(_as_list(parsed))}
+        return {"bullet": _as_str(parsed)}
+    if isinstance(value, list):
+        return {"items": value, "bullet": "、".join(_as_list(value))}
+    if value is None:
+        return {}
+    return {"bullet": _as_str(value)}
+
+
+def _coerce_confidence(value: Any) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+    else:
+        text = _as_str(value).lower()
+        confidence_aliases = {
+            "high": 1.0,
+            "高": 1.0,
+            "高置信": 1.0,
+            "strong": 1.0,
+            "certain": 1.0,
+            "medium": 0.7,
+            "mid": 0.7,
+            "中": 0.7,
+            "中等": 0.7,
+            "normal": 0.7,
+            "low": 0.4,
+            "低": 0.4,
+            "weak": 0.4,
+            "uncertain": 0.4,
+        }
+        if text in confidence_aliases:
+            numeric = confidence_aliases[text]
+        elif text.endswith("%"):
+            try:
+                numeric = float(text[:-1].strip()) / 100.0
+            except ValueError:
+                numeric = 0.7
+        else:
+            try:
+                numeric = float(text)
+            except ValueError:
+                numeric = 0.7
+    return min(max(numeric, 0.0), 1.0)
+
+
+def normalize_profile_section_record_payload(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    raw_section_type = _as_str(normalized.get("section_type") or "custom")
+    section_type = normalize_section_type_alias(raw_section_type)
+    title = _as_str(normalized.get("title")) or "待确认档案条目"
+    raw_content = coerce_profile_section_content_json(normalized.get("content_json"))
+    category_label = _as_str(raw_content.get("category_label")) if isinstance(raw_content, dict) else ""
+    if not is_valid_profile_section_type(section_type):
+        category_label = category_label or raw_section_type
+        section_type = "custom"
+    category_key, _resolved_label, _is_custom, canonical_content = canonicalize_profile_section_payload(
+        section_type=section_type,
+        title=title,
+        raw_content_json=raw_content,
+        category_label=category_label or None,
+    )
+    normalized["section_type"] = category_key
+    normalized["title"] = title
+    normalized["content_json"] = canonical_content
+    if "confidence" in normalized:
+        normalized["confidence"] = _coerce_confidence(normalized.get("confidence"))
+    return normalized
 
 
 def get_resume_section_type(category_key: str) -> str:

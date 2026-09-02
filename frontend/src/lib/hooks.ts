@@ -7,6 +7,12 @@
 // =============================================
 
 import useSWR from "swr";
+import {
+  optimizeAgentChatStream,
+  type AgentStreamEvent,
+  type PlanGroupExecutionEvent,
+  type PlanNodeExecutionEvent,
+} from "./api";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
@@ -45,6 +51,7 @@ export interface Job {
   apply_url: string;
   source: string;
   raw_description: string;
+  user_notes: string;
   posted_at: string | null;
   summary: string;
   keywords: string[];
@@ -244,6 +251,7 @@ export async function patchJob(
   id: number,
   data: {
     triage_status?: "inbox" | "picked" | "ignored";
+    user_notes?: string;
     pool_id?: number;
     clear_pool?: boolean;
   }
@@ -1829,6 +1837,18 @@ export interface OptimizeStreamEvent {
 // Optimize Agent Chat Stream
 // =============================================
 
+export interface OptimizePlanStatusEvent {
+  plan_id?: string;
+  status?: string;
+  groups?: PlanGroupExecutionEvent[];
+  nodes?: PlanNodeExecutionEvent[];
+  completion_reason?: string;
+  effective_status?: string;
+  /** durable recovery overlay (safe rebase / manual abort) from the backend envelope */
+  recovery?: Record<string, unknown>;
+  resolved_proposal_ids?: string[];
+}
+
 export interface OptimizeAgentStreamEvent {
   /** token-level streaming event */
   token?: string;
@@ -1850,7 +1870,11 @@ export interface OptimizeAgentStreamEvent {
     tool: string;
     args: Record<string, any>;
     summary: string;
+    risk?: unknown;
+    affected_records?: unknown[];
   };
+  /** durable Plan/Group/proposal execution state — never dropped from the stream */
+  plan_status?: OptimizePlanStatusEvent;
   /** section confirmed event */
   section_confirmed?: {
     section_index: number;
@@ -1869,116 +1893,99 @@ export async function streamOptimizeAgentChat(
     onEvent?: (event: OptimizeAgentStreamEvent) => void;
   }
 ) {
-  const res = await fetch(`${API_BASE}/api/optimize/agent/chat/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: options?.signal,
-  });
+  await optimizeAgentChatStream(
+    payload,
+    {
+      onEvent: (event) => {
+        const transformed = transformOptimizeAgentEvent(event);
+        if (transformed) options?.onEvent?.(transformed);
+      },
+      onError: (error) => {
+        options?.onEvent?.({ error: error.message, message: error.message });
+      },
+    },
+    options?.signal
+  );
+}
 
-  if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `请求失败 (${res.status})`);
+function transformOptimizeAgentEvent(event: AgentStreamEvent): OptimizeAgentStreamEvent | null {
+  if (event.type === "message_update") {
+    const delta = event.delta || {};
+    const token = typeof delta.text === "string" ? delta.text : typeof delta.content === "string" ? delta.content : "";
+    const thinking = typeof delta.thinking === "string" ? delta.thinking : "";
+    if (token) return { token };
+    if (thinking) return { progress: "thinking", label: "AI 正在思考..." };
+    return null;
   }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const findBoundary = (text: string) => {
-    const unix = text.indexOf("\n\n");
-    const windows = text.indexOf("\r\n\r\n");
-    if (unix === -1) return windows;
-    if (windows === -1) return unix;
-    return Math.min(unix, windows);
-  };
-
-  const emit = (chunk: string) => {
-    const dataLines: string[] = [];
-    for (const line of chunk.split(/\r?\n/)) {
-      if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trim());
-      }
-    }
-    if (dataLines.length === 0) return;
-    const dataText = dataLines.join("\n");
-    try {
-      const raw = JSON.parse(dataText);
-      const eventType = raw.event as string | undefined;
-
-      // Transform backend SSE format {"event": "type", ...data} → frontend OptimizeAgentStreamEvent
-      const transformed: OptimizeAgentStreamEvent = {};
-
-      switch (eventType) {
-        case "thinking":
-          transformed.progress = "thinking";
-          transformed.label = "AI 正在思考...";
-          break;
-        case "assistant_message":
-          transformed.assistant_message = raw.content;
-          if (raw.suggestions) transformed.suggestions = raw.suggestions;
-          if (raw.resume_id) transformed.resume_id = raw.resume_id;
-          break;
-        case "phase":
-          transformed.phase = raw.phase;
-          if (raw.session_id) transformed.session_id = raw.session_id;
-          break;
-        case "error":
-          transformed.error = raw.message;
-          transformed.message = raw.message;
-          break;
-        case "confirm_request":
-          transformed.confirm_request = {
-            tool: raw.tool,
-            args: raw.args,
-            summary: raw.summary,
-          };
-          break;
-        case "tool_call":
-          transformed.progress = "tool_call";
-          transformed.label = raw.status === "executing"
-            ? `执行 ${raw.tool}...`
-            : `${raw.tool} 完成`;
-          break;
-        case "resume_generated":
-          transformed.resume_id = raw.resume_id;
-          transformed.resume_title = raw.resume_title;
-          break;
-        case "section_confirmed":
-          transformed.section_confirmed = {
-            section_index: raw.section_index,
-            section_title: raw.section_title,
-            all_confirmed: raw.all_confirmed,
-          };
-          break;
-        default:
-          // Pass through unknown events as-is
-          Object.assign(transformed, raw);
-      }
-
-      options?.onEvent?.(transformed);
-    } catch {
-      // ignore malformed JSON
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let boundary = findBoundary(buffer);
-    while (boundary >= 0) {
-      const separatorLength = buffer.slice(boundary, boundary + 4) === "\r\n\r\n" ? 4 : 2;
-      const block = buffer.slice(0, boundary).trim();
-      buffer = buffer.slice(boundary + separatorLength);
-      if (block) emit(block);
-      boundary = findBoundary(buffer);
-    }
+  if (event.type === "final") {
+    return {
+      assistant_message: event.assistant_message || "",
+      phase: event.stop_reason,
+      session_id: event.conversation_id,
+      done: true,
+    };
   }
-
-  const tail = buffer.trim();
-  if (tail) emit(tail);
+  if (event.type === "plan_status") {
+    // Durable Plan/Group/proposal state must survive the Optimize transform:
+    // success is only presented when the durable envelope agrees.
+    return {
+      plan_status: {
+        plan_id: String(event.plan_id || ""),
+        status: String(event.status || "unknown"),
+        groups: Array.isArray(event.groups) ? event.groups : [],
+        nodes: Array.isArray(event.nodes) ? event.nodes : [],
+        completion_reason: String(event.completion_reason || ""),
+        effective_status: String(event.effective_status || ""),
+        recovery: event.recovery && typeof event.recovery === "object" ? event.recovery as Record<string, unknown> : undefined,
+        resolved_proposal_ids: Array.isArray(event.resolved_proposal_ids)
+          ? event.resolved_proposal_ids.map(String)
+          : undefined,
+      },
+    };
+  }
+  if (event.type === "tool_execution_start") {
+    return {
+      progress: "tool_call",
+      label: `执行 ${event.tool_name || event.toolName || "工具"}...`,
+    };
+  }
+  if (event.type === "tool_execution_end") {
+    return {
+      progress: "tool_call",
+      label: `${event.tool_name || event.toolName || "工具"} ${event.is_error ? "失败" : "完成"}`,
+    };
+  }
+  if (event.type === "proposal") {
+    const proposalId = String(event.proposal_id || event.proposal?.proposal_id || event.proposal?.id || "");
+    const affectedRecords = Array.isArray(event.affected_records)
+      ? event.affected_records
+      : Array.isArray(event.proposal?.affected_records)
+        ? event.proposal.affected_records
+        : undefined;
+    const challenge = String(
+      (event.proposal && typeof event.proposal === "object"
+        ? (event.proposal as Record<string, unknown>).confirmation_challenge
+        : "") || ""
+    );
+    return {
+      confirm_request: {
+        tool: "proposal",
+        args: {
+          proposal_id: proposalId,
+          proposal: event.proposal || event,
+          ...(challenge ? { confirmation_challenge: challenge } : {}),
+        },
+        summary: event.summary || "需要确认 proposal 后继续。",
+        risk: event.risk || event.proposal?.risk || event.proposal?.risk_level,
+        affected_records: affectedRecords,
+      },
+    };
+  }
+  if (event.type === "error") {
+    const message = typeof event.message === "string" ? event.message : JSON.stringify(event.error || "Agent stream failed");
+    return { error: message, message };
+  }
+  return null;
 }
 
 // ---- Optimize Agent Session Management ----
@@ -1994,11 +2001,22 @@ export interface OptimizeSessionSummary {
 
 export interface OptimizeSessionDetail extends OptimizeSessionSummary {
   messages: any[];
-  pending_action: Record<string, any> | null;
+  /**
+   * Durable reload projection (scoped to the authenticated browser principal):
+   * pending Plan/Group proposal cards plus plan_status envelopes. Legacy
+   * `pending_action` is not surfaced as an actionable card anymore.
+   */
+  durable?: {
+    proposals: Record<string, any>[];
+    plan_events: AgentStreamEvent[];
+    recovery_error?: string;
+  };
 }
 
 export async function fetchOptimizeSessions(): Promise<OptimizeSessionSummary[]> {
-  const res = await fetch(`${API_BASE}/api/optimize/agent/sessions`);
+  const res = await fetch(`${API_BASE}/api/optimize/agent/sessions`, {
+    credentials: "include",
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `获取会话列表失败 (${res.status})`);
@@ -2008,7 +2026,9 @@ export async function fetchOptimizeSessions(): Promise<OptimizeSessionSummary[]>
 }
 
 export async function fetchOptimizeSessionDetail(sessionId: string): Promise<OptimizeSessionDetail> {
-  const res = await fetch(`${API_BASE}/api/optimize/agent/sessions/${sessionId}`);
+  const res = await fetch(`${API_BASE}/api/optimize/agent/sessions/${sessionId}`, {
+    credentials: "include",
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `获取会话详情失败 (${res.status})`);
@@ -2019,6 +2039,7 @@ export async function fetchOptimizeSessionDetail(sessionId: string): Promise<Opt
 export async function deleteOptimizeSession(sessionId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/api/optimize/agent/sessions/${sessionId}`, {
     method: "DELETE",
+    credentials: "include",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

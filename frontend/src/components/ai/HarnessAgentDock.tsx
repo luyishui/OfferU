@@ -1,21 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Button, Chip, ScrollShadow, Textarea } from "@nextui-org/react";
 import {
-  Button,
-  Card,
-  CardBody,
-  Chip,
-  ScrollShadow,
-  Textarea,
-} from "@nextui-org/react";
-import {
-  AlertTriangle,
   Bot,
-  Briefcase,
-  CheckCircle2,
-  History,
   Download,
+  GitBranch,
+  History,
   Loader2,
   Plus,
   Send,
@@ -23,45 +14,45 @@ import {
   Trash2,
   Upload,
   UserRound,
-  Wrench,
   X,
 } from "lucide-react";
 import {
+  agentChatStream,
   harnessAgentApi,
-  type HarnessAgentCareerPath,
+  type AgentConversationTree,
+  type AgentStreamEvent,
   type HarnessAgentConversationSummary,
-  type HarnessAgentJobCard,
-  type HarnessAgentMessage,
-  type HarnessAgentProposedAction,
-  type HarnessAgentResponse,
 } from "@/lib/api";
+import {
+  agentStreamReducer,
+  applyProposalDecisionResponse,
+  applyManualReviewResolutionResponse,
+  mergeManualReviewCases,
+  proposalDecisionUiTransition,
+  createInitialAgentStreamState,
+  type AgentStreamState,
+  type DisplayAgentMessage,
+} from "@/lib/agentStreamReducer";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
+import {
+  AgentCardList,
+  ManualReviewCaseList,
+  PlanExecutionList,
+  AgentStreamMessageBubble,
+  ProposalList,
+  StreamingAssistantBubble,
+  ToolExecutionList,
+  apiMessagesFromDisplay,
+  makeDisplayMessage,
+  messagesFromTree,
+} from "./AgentStreamView";
 import { useDraggableDock } from "./useDraggableDock";
 
-interface DockMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  response?: HarnessAgentResponse;
-}
-
 const QUICK_ACTIONS = [
-  {
-    label: "确认身份",
-    prompt: "先问我几个问题，判断我是校招/应届/实习，还是社招/跳槽",
-  },
-  {
-    label: "校招体检",
-    prompt: "按校招标准检查我的档案、简历、岗位和投递流程缺口",
-  },
-  {
-    label: "每日岗位",
-    prompt: "今天给我推荐一个最值得投的校招/实习岗位，并说明为什么",
-  },
-  {
-    label: "异常检测",
-    prompt: "检查我的档案、岗位库、投递管理和面试日程有没有异常",
-  },
+  { label: "确认身份", prompt: "先问我几个问题，判断我是校招/应届/实习，还是社招/跳槽" },
+  { label: "校招体检", prompt: "按校招标准检查我的档案、简历、岗位和投递流程缺口" },
+  { label: "每日岗位", prompt: "今天给我推荐一个最值得投的校招/实习岗位，并说明为什么" },
+  { label: "异常检测", prompt: "检查我的档案、岗位库、投递管理和面试日程有没有异常" },
 ];
 
 const STAGE_LABELS: Record<string, string> = {
@@ -70,55 +61,43 @@ const STAGE_LABELS: Record<string, string> = {
   unknown: "待确认",
 };
 
-function previewJson(value: unknown) {
-  try {
-    const text = JSON.stringify(value, null, 2);
-    return text.length > 260 ? `${text.slice(0, 260)}...` : text;
-  } catch {
-    return String(value);
-  }
-}
-
-function toApiMessages(messages: DockMessage[]): HarnessAgentMessage[] {
-  return messages.map((message) => ({
-    role: message.role,
-    content: message.content,
-  }));
+function welcomeState(): AgentStreamState {
+  return {
+    ...createInitialAgentStreamState(),
+    messages: [
+      makeDisplayMessage(
+        "assistant",
+        "我是 OfferU 全局助手。现在我会先识别你是校招还是社招，再主动检查档案、岗位、简历、投递和面试日程里的风险。",
+        "welcome"
+      ),
+    ],
+  };
 }
 
 export function HarnessAgentDock() {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<DockMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content:
-        "我是 OfferU 全局助手。现在我会先识别你是校招还是社招，再主动检查档案、岗位、简历、投递和面试日程里的风险。",
-    },
-  ]);
+  const [agentState, setAgentState] = useState<AgentStreamState>(welcomeState);
   const [input, setInput] = useState("");
-  const [pendingActions, setPendingActions] = useState<HarnessAgentProposedAction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [importedStage, setImportedStage] = useState<string>("unknown");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversationTitle, setConversationTitle] = useState("新对话");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(false);
+  const [tree, setTree] = useState<AgentConversationTree | null>(null);
   const [conversations, setConversations] = useState<HarnessAgentConversationSummary[]>([]);
+  const [resolvedProposalIds, setResolvedProposalIds] = useState<Set<string>>(new Set());
+  const [confirmationChallenges, setConfirmationChallenges] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const { dockRef, dockStyle, dragHandleProps, launcherDragHandleProps, consumeDragClick } = useDraggableDock({
     width: 440,
     height: 600,
   });
 
-  const hasPendingActions = pendingActions.length > 0;
-
-  const latestResponse = useMemo(() => {
-    return [...messages].reverse().find((message) => message.response)?.response;
-  }, [messages]);
-
-  const latestMode = latestResponse?.mode || "ready";
-  const latestStage = latestResponse?.user_stage || importedStage || "unknown";
+  const latestStage = String(agentState.finalResponse?.user_stage || importedStage || "unknown");
+  const latestMode = loading ? "streaming" : agentState.finalResponse?.stop_reason || agentState.status || "ready";
 
   const refreshConversations = async () => {
     try {
@@ -130,82 +109,108 @@ export function HarnessAgentDock() {
   };
 
   useEffect(() => {
-    if (open) refreshConversations();
+    if (open) void refreshConversations();
   }, [open]);
 
-  const sendMessage = async (text?: string, confirmedActionIds?: string[]) => {
+  const dispatchStreamEvent = (event: AgentStreamEvent) => {
+    setAgentState((prev) => agentStreamReducer(prev, event));
+    if (event.type === "final" && event.conversation_id) {
+      setConversationId(event.conversation_id);
+      setConversationTitle(event.conversation_id);
+    }
+  };
+
+  const sendMessage = async (text?: string) => {
     const content = (text ?? input).trim();
-    const isConfirmation = Boolean(confirmedActionIds?.length);
-    if ((!content && !isConfirmation) || loading) return;
+    if (!content || loading) return;
 
-    const userMessage: DockMessage | null = isConfirmation
-      ? null
-      : {
-          id: `user-${Date.now()}`,
-          role: "user",
-          content,
-        };
-    const nextMessages = userMessage ? [...messages, userMessage] : messages;
-
-    setMessages(nextMessages);
+    const userMessage = makeDisplayMessage("user", content);
+    const nextMessages = [...agentState.messages, userMessage];
+    setAgentState((prev) => ({ ...prev, messages: nextMessages, status: "streaming", error: "" }));
     setInput("");
     setLoading(true);
     setError("");
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const response = await harnessAgentApi.chat({
-        messages: toApiMessages(nextMessages),
-        confirmed_action_ids: confirmedActionIds,
-        conversation_id: conversationId,
-      });
-      const assistantMessage: DockMessage = {
-        id: `assistant-${Date.now()}`,
-        role: "assistant",
-        content: response.assistant_message,
-        response,
-      };
-      if (response.conversation_id) setConversationId(response.conversation_id);
-      if (response.conversation_title) setConversationTitle(response.conversation_title);
-      setMessages((prev) => [...prev, assistantMessage]);
-      setPendingActions(response.proposed_actions || []);
-      refreshConversations();
+      await agentChatStream(
+        {
+          messages: apiMessagesFromDisplay(nextMessages),
+          conversation_id: conversationId,
+        },
+        {
+          onEvent: dispatchStreamEvent,
+          onError: (streamError) => setError(streamError.message || "全局助手流式响应失败"),
+        },
+        controller.signal
+      );
+      await refreshConversations();
     } catch (err: any) {
-      setError(err.message || "全局助手请求失败");
+      if (err?.name !== "AbortError") setError(err.message || "全局助手请求失败");
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
     }
   };
 
   const startNewConversation = () => {
+    abortRef.current?.abort();
     setConversationId(null);
     setConversationTitle("新对话");
-    setPendingActions([]);
+    setResolvedProposalIds(new Set());
+    setConfirmationChallenges({});
     setHistoryOpen(false);
-    setMessages([
-      {
-        id: `welcome-${Date.now()}`,
-        role: "assistant",
-        content:
+    setTreeOpen(false);
+    setTree(null);
+    setAgentState({
+      ...createInitialAgentStreamState(),
+      messages: [
+        makeDisplayMessage(
+          "assistant",
           "新对话已开始。先告诉我你是校招/应届/实习，还是社招/跳槽，我会按对应路径主动检查。",
-      },
-    ]);
+          `welcome-${Date.now()}`
+        ),
+      ],
+    });
   };
 
   const loadConversation = async (id: string) => {
     setError("");
     try {
       const conversation = await harnessAgentApi.conversation(id);
+      const bootstrap = await harnessAgentApi.sessionBootstrap(conversation.id);
       setConversationId(conversation.id);
       setConversationTitle(conversation.title || "历史对话");
-      setPendingActions([]);
+      setResolvedProposalIds(new Set());
+      setConfirmationChallenges(Object.fromEntries(
+        (bootstrap.proposals || [])
+          .filter((proposal) => String(proposal.status || "") === "awaiting_next_confirmation")
+          .map((proposal) => [String(proposal.proposal_id || ""), String(proposal.confirmation_challenge || "")])
+          .filter(([proposalId, challenge]) => Boolean(proposalId && challenge))
+      ));
       setHistoryOpen(false);
-      setMessages(
-        (conversation.messages || []).map((message, index) => ({
+      let restoredState: AgentStreamState = {
+        ...createInitialAgentStreamState(),
+        messages: (conversation.messages || []).map((message, index): DisplayAgentMessage => ({
           id: `${conversation.id}-${index}`,
           role: message.role,
-          content: message.content,
-        }))
-      );
+          text: message.content,
+        })),
+      };
+      for (const proposal of bootstrap.proposals || []) {
+        restoredState = agentStreamReducer(restoredState, {
+          type: "proposal",
+          proposal_id: String(proposal.proposal_id || ""),
+          proposal,
+        });
+      }
+      for (const planEvent of bootstrap.plan_events || []) {
+        restoredState = agentStreamReducer(restoredState, planEvent);
+      }
+      setAgentState(restoredState);
     } catch (err: any) {
       setError(err.message || "加载历史对话失败");
     }
@@ -222,8 +227,55 @@ export function HarnessAgentDock() {
     }
   };
 
-  const confirmPendingActions = () => {
-    sendMessage("", pendingActions.map((action) => action.id));
+  const confirmProposal = async (proposalId: string) => {
+    if (loading || !conversationId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const challenge = confirmationChallenges[proposalId];
+      const result = await harnessAgentApi.confirmProposal(
+        proposalId,
+        conversationId,
+        challenge ? { confirmation_challenge: challenge } : {}
+      );
+      const transition = proposalDecisionUiTransition(
+        resolvedProposalIds,
+        confirmationChallenges,
+        proposalId,
+        result
+      );
+      setResolvedProposalIds(transition.resolvedProposalIds);
+      setConfirmationChallenges(transition.confirmationChallenges);
+      if (result.continuation || result.next_proposals || result.plan_event) {
+        setAgentState((prev) => applyProposalDecisionResponse(prev, result));
+      }
+    } catch (err: any) {
+      setError(err.message || "确认 proposal 失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const rejectProposal = async (proposalId: string) => {
+    if (loading || !conversationId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await harnessAgentApi.rejectProposal(proposalId, conversationId);
+      setAgentState((prev) => applyProposalDecisionResponse(prev, result));
+      const transition = proposalDecisionUiTransition(
+        resolvedProposalIds,
+        confirmationChallenges,
+        proposalId,
+        result
+      );
+      setResolvedProposalIds(transition.resolvedProposalIds);
+      setConfirmationChallenges(transition.confirmationChallenges);
+    } catch (err: any) {
+      setError(err.message || "拒绝 proposal 失败");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const exportMemory = async () => {
@@ -231,14 +283,10 @@ export function HarnessAgentDock() {
     try {
       const result = await harnessAgentApi.exportMemory("markdown");
       await navigator.clipboard.writeText(String(result.content || ""));
-      setMessages((prev) => [
+      setAgentState((prev) => ({
         ...prev,
-        {
-          id: `memory-export-${Date.now()}`,
-          role: "assistant",
-          content: "已把当前 Agent 记忆导出为 Markdown，并放到剪贴板。",
-        },
-      ]);
+        messages: [...prev.messages, makeDisplayMessage("assistant", "已把当前 Agent 记忆导出为 Markdown，并放到剪贴板。")],
+      }));
     } catch (err: any) {
       setError(err.message || "导出记忆失败");
     }
@@ -250,18 +298,54 @@ export function HarnessAgentDock() {
       const text = await file.text();
       const result = await harnessAgentApi.importMemory(text);
       setImportedStage(result.memory.user_stage);
-      setMessages((prev) => [
+      setAgentState((prev) => ({
         ...prev,
-        {
-          id: `memory-import-${Date.now()}`,
-          role: "assistant",
-          content: `已导入本地记忆。当前识别为：${STAGE_LABELS[result.memory.user_stage] || result.memory.user_stage}。`,
-        },
-      ]);
+        messages: [
+          ...prev.messages,
+          makeDisplayMessage(
+            "assistant",
+            `已导入本地记忆。当前识别为：${STAGE_LABELS[result.memory.user_stage] || result.memory.user_stage}。`
+          ),
+        ],
+      }));
     } catch (err: any) {
       setError(err.message || "导入记忆失败");
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const refreshTree = async (): Promise<AgentConversationTree | null> => {
+    if (!conversationId) return null;
+    try {
+      const nextTree = await harnessAgentApi.getConversationTree(conversationId);
+      setTree(nextTree);
+      return nextTree;
+    } catch (err: any) {
+      setError(err.message || "加载会话树失败");
+      return null;
+    }
+  };
+
+  const toggleTree = async () => {
+    const next = !treeOpen;
+    setTreeOpen(next);
+    if (next) await refreshTree();
+  };
+
+  const navigateTree = async (entryId: string) => {
+    if (!conversationId || loading) return;
+    setError("");
+    try {
+      await harnessAgentApi.navigateConversationTree(conversationId, entryId);
+      const refreshed = await refreshTree();
+      if (!refreshed) return;
+      setAgentState((prev) => ({
+        ...prev,
+        messages: messagesFromTree(refreshed),
+      }));
+    } catch (err: any) {
+      setError(err.message || "导航会话树失败");
     }
   };
 
@@ -319,14 +403,7 @@ export function HarnessAgentDock() {
           <Chip size="sm" className="border border-black bg-white text-[10px] font-semibold text-black">
             {latestMode}
           </Chip>
-          <Button
-            isIconOnly
-            size="sm"
-            variant="light"
-            aria-label="关闭助手"
-            onPress={() => setOpen(false)}
-            className="min-w-8 text-black"
-          >
+          <Button isIconOnly size="sm" variant="light" aria-label="关闭助手" onPress={() => setOpen(false)} className="min-w-8 text-black">
             <X size={16} />
           </Button>
         </div>
@@ -336,15 +413,39 @@ export function HarnessAgentDock() {
         <div className="border-b-2 border-black bg-white px-4 py-3">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-black text-black">历史对话</p>
-            <Button
-              size="sm"
-              startContent={<Plus size={13} />}
-              onPress={startNewConversation}
-              className="h-8 border-2 border-black bg-[#F0C020] px-2 text-xs font-black text-black"
-            >
-              新建
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                isIconOnly
+                size="sm"
+                aria-label="会话树"
+                isDisabled={!conversationId}
+                onPress={() => void toggleTree()}
+                className="h-8 min-w-8 border-2 border-black bg-white text-black"
+              >
+                <GitBranch size={13} />
+              </Button>
+              <Button size="sm" startContent={<Plus size={13} />} onPress={startNewConversation} className="h-8 border-2 border-black bg-[#F0C020] px-2 text-xs font-black text-black">
+                新建
+              </Button>
+            </div>
           </div>
+          {treeOpen && tree && (
+            <div className="mb-3 max-h-40 space-y-2 overflow-y-auto border border-black/20 bg-[var(--surface-muted)] p-2">
+              {tree.entries.map((entry) => (
+                <button
+                  key={entry.entry_id}
+                  type="button"
+                  onClick={() => void navigateTree(entry.entry_id)}
+                  className={`w-full border px-2 py-1 text-left text-[11px] ${
+                    entry.entry_id === tree.leaf_id ? "border-black bg-[#FFF4D8]" : "border-black/20 bg-white"
+                  }`}
+                >
+                  <span className="font-black">{entry.entry_type}</span>
+                  <span className="ml-2 break-words text-black/60">{entry.preview}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="max-h-40 space-y-2 overflow-y-auto">
             {conversations.length === 0 && (
               <p className="border border-black/20 bg-[var(--surface-muted)] px-3 py-2 text-xs font-semibold text-black/60">
@@ -358,24 +459,13 @@ export function HarnessAgentDock() {
                   conversation.id === conversationId ? "border-black bg-[#FFF4D8]" : "border-black/20 bg-white"
                 }`}
               >
-                <button
-                  type="button"
-                  onClick={() => loadConversation(conversation.id)}
-                  className="min-w-0 flex-1 text-left"
-                >
+                <button type="button" onClick={() => void loadConversation(conversation.id)} className="min-w-0 flex-1 text-left">
                   <p className="truncate text-xs font-black text-black">{conversation.title || "历史对话"}</p>
                   <p className="mt-0.5 truncate text-[11px] font-medium text-black/55">
                     {conversation.message_count} 条 / {conversation.last_message}
                   </p>
                 </button>
-                <Button
-                  isIconOnly
-                  size="sm"
-                  variant="light"
-                  aria-label="删除历史对话"
-                  onPress={() => removeConversation(conversation.id)}
-                  className="min-w-8 text-[#D02020]"
-                >
+                <Button isIconOnly size="sm" variant="light" aria-label="删除历史对话" onPress={() => void removeConversation(conversation.id)} className="min-w-8 text-[#D02020]">
                   <Trash2 size={14} />
                 </Button>
               </div>
@@ -386,11 +476,7 @@ export function HarnessAgentDock() {
 
       <div className="flex flex-wrap gap-2 border-b border-black/10 px-4 py-3">
         {QUICK_ACTIONS.map((action) => (
-          <Chip
-            key={action.label}
-            className="cursor-pointer border-2 border-black bg-white px-2 text-xs font-semibold text-black"
-            onClick={() => sendMessage(action.prompt)}
-          >
+          <Chip key={action.label} className="cursor-pointer border-2 border-black bg-white px-2 text-xs font-semibold text-black" onClick={() => void sendMessage(action.prompt)}>
             {action.label}
           </Chip>
         ))}
@@ -406,27 +492,13 @@ export function HarnessAgentDock() {
             className="hidden"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) importMemoryFile(file);
+              if (file) void importMemoryFile(file);
             }}
           />
-          <Button
-            isIconOnly
-            size="sm"
-            variant="light"
-            aria-label="导入本地记忆"
-            onPress={() => fileInputRef.current?.click()}
-            className="min-w-8 text-black"
-          >
+          <Button isIconOnly size="sm" variant="light" aria-label="导入本地记忆" onPress={() => fileInputRef.current?.click()} className="min-w-8 text-black">
             <Upload size={15} />
           </Button>
-          <Button
-            isIconOnly
-            size="sm"
-            variant="light"
-            aria-label="导出助手记忆"
-            onPress={exportMemory}
-            className="min-w-8 text-black"
-          >
+          <Button isIconOnly size="sm" variant="light" aria-label="导出助手记忆" onPress={() => void exportMemory()} className="min-w-8 text-black">
             <Download size={15} />
           </Button>
         </div>
@@ -434,44 +506,40 @@ export function HarnessAgentDock() {
 
       <ScrollShadow className="min-h-[19rem] flex-1 overflow-y-auto px-4 py-3">
         <div className="space-y-4">
-          {messages.map((message) => (
-            <DockMessageBubble key={message.id} message={message} onSuggestion={sendMessage} />
+          {agentState.messages.map((message) => (
+            <AgentStreamMessageBubble key={message.id} message={message} compact />
           ))}
-          {loading && (
+          {agentState.streaming && <StreamingAssistantBubble streaming={agentState.streaming} compact />}
+          {loading && !agentState.streaming && (
             <div className="inline-flex items-center gap-2 border-2 border-black bg-white px-3 py-2 text-sm font-medium text-black/65">
               <Loader2 size={14} className="animate-spin" />
-              正在检查档案、记忆和下一步动作...
+              正在连接 Agent...
             </div>
           )}
+          <ToolExecutionList executions={agentState.toolExecutions} />
+          <AgentCardList cards={agentState.cards} />
         </div>
       </ScrollShadow>
 
-      {hasPendingActions && (
-        <div className="border-t-2 border-black bg-[#F7E4E1] px-4 py-3">
-          <p className="text-xs font-bold text-black">需要确认的动作</p>
-          <div className="mt-2 space-y-2">
-            {pendingActions.map((action) => (
-              <div key={action.id} className="border border-black bg-white px-3 py-2 text-xs font-medium text-black">
-                {action.summary}
-              </div>
-            ))}
-          </div>
-          <Button
-            onPress={confirmPendingActions}
-            isDisabled={loading}
-            startContent={loading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-            className="bauhaus-button bauhaus-button-red mt-3 !w-full !justify-center !py-2 !text-xs"
-          >
-            确认执行
-          </Button>
-        </div>
-      )}
+      <div className="border-t border-black/10 bg-[#F7E4E1] px-4 py-3">
+        <PlanExecutionList plans={agentState.plans} />
 
-      {error && (
-        <div className="border-t border-black bg-[#D02020] px-4 py-2 text-xs font-semibold text-white">
-          {error}
-        </div>
-      )}
+      <ProposalList
+          proposals={agentState.proposals}
+          resolvedIds={resolvedProposalIds}
+          loading={loading}
+          onConfirm={(id) => void confirmProposal(id)}
+          onReject={(id) => void rejectProposal(id)}
+        />
+      </div>
+
+      <ManualReviewCaseList
+        sessionId={conversationId}
+        cases={agentState.manualReviewCases}
+        onCasesLoaded={(cases) => setAgentState((prev) => mergeManualReviewCases(prev, cases))}
+        onResolution={(result) => setAgentState((prev) => applyManualReviewResolutionResponse(prev, result))}
+      />
+      {error && <div className="border-t border-black bg-[#D02020] px-4 py-2 text-xs font-semibold text-white">{error}</div>}
 
       <footer className="border-t-2 border-black bg-white p-3">
         <div className="flex items-end gap-2">
@@ -488,194 +556,15 @@ export function HarnessAgentDock() {
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                sendMessage();
+                void sendMessage();
               }
             }}
           />
-          <Button
-            isIconOnly
-            aria-label="发送"
-            onPress={() => sendMessage()}
-            isDisabled={!input.trim() || loading}
-            className="bauhaus-button bauhaus-button-red !min-h-10 !min-w-10 !px-0 !py-0"
-          >
+          <Button isIconOnly aria-label="发送" onPress={() => void sendMessage()} isDisabled={!input.trim() || loading} className="bauhaus-button bauhaus-button-red !min-h-10 !min-w-10 !px-0 !py-0">
             {loading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
           </Button>
         </div>
       </footer>
     </section>
-  );
-}
-
-function DockMessageBubble({
-  message,
-  onSuggestion,
-}: {
-  message: DockMessage;
-  onSuggestion: (prompt: string) => void;
-}) {
-  const isUser = message.role === "user";
-  const response = message.response;
-
-  return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[92%] ${isUser ? "text-right" : ""}`}>
-        <div
-          className={`inline-block whitespace-pre-wrap border-2 border-black px-3 py-2 text-sm font-medium leading-6 shadow-[2px_2px_0_0_rgba(18,18,18,0.18)] ${
-            isUser ? "bg-[#F7E4E1] text-black" : "bg-white text-black"
-          }`}
-        >
-          {message.content}
-        </div>
-        {response && (
-          <div className="mt-3 space-y-3 text-left">
-            {response.alerts && response.alerts.length > 0 && <AlertList alerts={response.alerts} />}
-            {response.proactive_suggestions && response.proactive_suggestions.length > 0 && (
-              <SuggestionList suggestions={response.proactive_suggestions} onSuggestion={onSuggestion} />
-            )}
-            {response.transferable_skills_summary && (
-              <Card className="rounded-none border-2 border-black shadow-none">
-                <CardBody className="p-3 text-xs font-medium leading-5 text-black/75">
-                  {response.transferable_skills_summary}
-                </CardBody>
-              </Card>
-            )}
-            {response.career_paths && response.career_paths.length > 0 && <CareerPathList paths={response.career_paths} />}
-            {response.job_cards && response.job_cards.length > 0 && <JobCardList jobs={response.job_cards} />}
-            {response.tool_calls && response.tool_calls.length > 0 && <ToolCallList calls={response.tool_calls} />}
-            {response.next_steps && response.next_steps.length > 0 && (
-              <ul className="space-y-1 border border-black/20 bg-[var(--surface-muted)] p-3 text-xs font-medium text-black/70">
-                {response.next_steps.map((step) => (
-                  <li key={step}>- {step}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AlertList({ alerts }: { alerts: NonNullable<HarnessAgentResponse["alerts"]> }) {
-  return (
-    <div className="space-y-2">
-      {alerts.map((alert) => (
-        <div key={alert.code} className="border-2 border-black bg-[#FFF4D8] p-3 text-xs text-black">
-          <div className="flex items-start gap-2">
-            <AlertTriangle size={15} className="mt-0.5 shrink-0 text-[#D02020]" />
-            <div>
-              <p className="font-black">{alert.title}</p>
-              <p className="mt-1 font-medium leading-5 text-black/70">{alert.message}</p>
-              {alert.action && <p className="mt-1 font-bold text-black">{alert.action}</p>}
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SuggestionList({
-  suggestions,
-  onSuggestion,
-}: {
-  suggestions: NonNullable<HarnessAgentResponse["proactive_suggestions"]>;
-  onSuggestion: (prompt: string) => void;
-}) {
-  return (
-    <div className="space-y-2">
-      {suggestions.map((suggestion) => (
-        <button
-          key={`${suggestion.title}-${suggestion.prompt}`}
-          type="button"
-          onClick={() => onSuggestion(suggestion.prompt)}
-          className="w-full border-2 border-black bg-white p-3 text-left text-xs text-black shadow-[2px_2px_0_0_rgba(18,18,18,0.16)] transition-transform hover:-translate-y-0.5"
-        >
-          <p className="font-black">{suggestion.title}</p>
-          <p className="mt-1 font-medium leading-5 text-black/65">{suggestion.description}</p>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function CareerPathList({ paths }: { paths: HarnessAgentCareerPath[] }) {
-  return (
-    <div className="space-y-2">
-      {paths.map((path) => (
-        <Card key={path.title} className="rounded-none border-2 border-black bg-white shadow-none">
-          <CardBody className="p-3">
-            <div className="flex items-start gap-2">
-              <Sparkles size={15} className="mt-1 shrink-0 text-[#D02020]" />
-              <div className="min-w-0">
-                <p className="text-sm font-black text-black">{path.title}</p>
-                <p className="mt-1 text-[11px] font-semibold text-black/55">{path.industry}</p>
-                <p className="mt-2 text-xs font-medium leading-5 text-black/70">{path.fit_reason}</p>
-                <p className="mt-2 text-xs font-semibold text-black">{path.salary_range}</p>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {path.search_keywords.map((keyword) => (
-                    <Chip key={keyword} size="sm" className="border border-black bg-[#F0C020] text-[10px] text-black">
-                      {keyword}
-                    </Chip>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-function JobCardList({ jobs }: { jobs: HarnessAgentJobCard[] }) {
-  return (
-    <div className="space-y-2">
-      {jobs.map((job) => (
-        <Card key={job.id} className="rounded-none border-2 border-black bg-white shadow-none">
-          <CardBody className="p-3">
-            <div className="flex items-start gap-2">
-              <Briefcase size={15} className="mt-1 shrink-0 text-[#2060D0]" />
-              <div className="min-w-0">
-                <p className="text-sm font-black text-black">{job.company}</p>
-                <p className="mt-1 text-xs font-semibold text-black/70">{job.title}</p>
-                <p className="mt-1 text-[11px] font-medium text-black/55">
-                  {[job.location, job.salary_text, job.source].filter(Boolean).join(" / ")}
-                </p>
-                {job.apply_url && (
-                  <a
-                    href={job.apply_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-2 inline-block text-xs font-bold text-[#D02020] underline"
-                  >
-                    打开投递链接
-                  </a>
-                )}
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-function ToolCallList({ calls }: { calls: HarnessAgentResponse["tool_calls"] }) {
-  return (
-    <div className="space-y-2">
-      {calls.map((call, index) => (
-        <details key={`${call.tool}-${index}`} className="border border-black/25 bg-white p-2 text-xs text-black/65">
-          <summary className="flex cursor-pointer items-center gap-2 font-bold text-black">
-            <Wrench size={13} />
-            {call.tool}
-          </summary>
-          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap bg-[#F0F0F0] p-2">
-            {previewJson(call.result)}
-          </pre>
-        </details>
-      ))}
-    </div>
   );
 }

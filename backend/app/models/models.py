@@ -1,9 +1,9 @@
+﻿# =============================================
+# OfferU - 鏁版嵁搴撴ā鍨嬪畾涔?
 # =============================================
-# OfferU - 数据库模型定义
-# =============================================
-# 核心表：jobs, resumes, resume_sections, resume_templates,
+# 鏍稿績琛細jobs, resumes, resume_sections, resume_templates,
 #         interview_notifications, calendar_events, applications
-# 使用 SQLAlchemy 2.0 Mapped 声明式语法
+# 浣跨敤 SQLAlchemy 2.0 Mapped 澹版槑寮忚娉?
 # =============================================
 
 from datetime import datetime
@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     ForeignKey,
+    ForeignKeyConstraint,
     UniqueConstraint,
     func,
 )
@@ -26,7 +27,19 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
-class Job(Base):
+LOCAL_DEFAULT_ACTOR_ID = "local-default"
+
+
+class OperatorOwnedMixin:
+    """Ownership and optimistic-version markers for mutable user records."""
+
+    owner_actor_id: Mapped[str] = mapped_column(
+        String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True
+    )
+    operator_version_hash: Mapped[str] = mapped_column(String(128), default="")
+
+
+class Job(OperatorOwnedMixin, Base):
     """岗位表：存储从各平台爬取的岗位信息"""
     __tablename__ = "jobs"
 
@@ -56,6 +69,7 @@ class Job(Base):
     # ---- AI 分析输出 ----
     summary: Mapped[str] = mapped_column(Text, default="")
     keywords: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    user_notes: Mapped[str] = mapped_column(Text, default="")
 
     # ---- Inbox 分拣与池分组 ----
     triage_status: Mapped[str] = mapped_column(String(20), default="inbox", index=True)
@@ -75,7 +89,7 @@ class Job(Base):
     pool: Mapped[Optional["Pool"]] = relationship(back_populates="jobs")
 
 
-class Pool(Base):
+class Pool(OperatorOwnedMixin, Base):
     """岗位池：用于在已筛选岗位中按主题做分组（前端语义为文件夹）"""
 
     __tablename__ = "pools"
@@ -110,7 +124,7 @@ class Batch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-class Profile(Base):
+class Profile(OperatorOwnedMixin, Base):
     """个人档案主表：承载基础信息与叙事字段"""
 
     __tablename__ = "profiles"
@@ -148,7 +162,7 @@ class Profile(Base):
     )
 
 
-class ProfileTargetRole(Base):
+class ProfileTargetRole(OperatorOwnedMixin, Base):
     """目标岗位条目：支持 fit 分级"""
 
     __tablename__ = "profile_target_roles"
@@ -165,7 +179,7 @@ class ProfileTargetRole(Base):
     profile: Mapped["Profile"] = relationship(back_populates="target_roles")
 
 
-class ProfileSection(Base):
+class ProfileSection(OperatorOwnedMixin, Base):
     """档案条目：Bullet 级事实条目，支持来源与置信度"""
 
     __tablename__ = "profile_sections"
@@ -235,7 +249,7 @@ class ResumeTemplate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-class Resume(Base):
+class Resume(OperatorOwnedMixin, Base):
     """
     简历主表：存储简历元信息和全局设置
     ─────────────────────────────────────────────
@@ -279,7 +293,7 @@ class Resume(Base):
     template: Mapped[Optional["ResumeTemplate"]] = relationship()
 
 
-class ResumeSection(Base):
+class ResumeSection(OperatorOwnedMixin, Base):
     """
     简历段落通用块表：每一段（教育/经历/技能/项目/自定义）是一条记录
     ─────────────────────────────────────────────
@@ -313,7 +327,7 @@ class ResumeSection(Base):
     resume: Mapped["Resume"] = relationship(back_populates="sections")
 
 
-class InterviewNotification(Base):
+class InterviewNotification(OperatorOwnedMixin, Base):
     """面试通知表：从邮件中解析出的面试邀请"""
     __tablename__ = "interview_notifications"
 
@@ -334,7 +348,7 @@ class InterviewNotification(Base):
     calendar_events: Mapped[list["CalendarEvent"]] = relationship(back_populates="notification")
 
 
-class CalendarEvent(Base):
+class CalendarEvent(OperatorOwnedMixin, Base):
     """日程表：面试日程 + 自动同步事件"""
     __tablename__ = "calendar_events"
 
@@ -360,9 +374,14 @@ class CalendarEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-class Application(Base):
+class Application(OperatorOwnedMixin, Base):
     """投递记录表：跟踪自动/手动投递状态"""
     __tablename__ = "applications"
+    __table_args__ = (
+        # One canonical Application per (owner, job): the workspace guarantees
+        # exactly one lifecycle/material record per tracked job.
+        UniqueConstraint("owner_actor_id", "job_id", name="uq_applications_owner_job"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("jobs.id"))
@@ -405,7 +424,7 @@ class ApplicationTemplate(Base):
     )
 
 
-class ApplicationTable(Base):
+class ApplicationTable(OperatorOwnedMixin, Base):
     """投递表容器：总表 + 子表"""
     __tablename__ = "application_tables"
 
@@ -424,12 +443,26 @@ class ApplicationTable(Base):
     )
 
 
-class ApplicationRecord(Base):
+class ApplicationRecord(OperatorOwnedMixin, Base):
     """投递业务记录实体：总表与子表共享同一实体，保证值同步"""
     __tablename__ = "application_records"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_ref_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
+    # Canonical Application binding: this workspace projection row is backed by
+    # exactly one canonical Application lifecycle/material record. Nullable so
+    # legacy rows can be backfilled unambiguously or left for manual review.
+    application_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("applications.id", name="fk_application_record_application", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    # Canonical lifecycle stage (draft/pending/submitted/interview/rejected/offer)
+    # projected from the ApplicationLifecycleSpec authority. The workspace UI
+    # vocabulary (待投递/已投递/面试中/已拒绝/已录用) lives in custom_values and maps
+    # through the same lifecycle registry labels.
+    apply_status: Mapped[str] = mapped_column(String(50), default="pending")
     company_name: Mapped[str] = mapped_column(String(300), default="", index=True)
     job_title: Mapped[str] = mapped_column(String(500), default="", index=True)
     location: Mapped[str] = mapped_column(String(300), default="", index=True)
@@ -443,6 +476,10 @@ class ApplicationRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    application: Mapped[Optional["Application"]] = relationship(
+        foreign_keys=[application_id],
     )
 
     table_links: Mapped[list["ApplicationTableRecord"]] = relationship(
@@ -471,7 +508,7 @@ class ApplicationTableRecord(Base):
 # 面经模块 (PRD §8.5)
 # =============================================
 
-class InterviewExperience(Base):
+class InterviewExperience(OperatorOwnedMixin, Base):
     """收集到的面经原文"""
     __tablename__ = "interview_experiences"
 
@@ -490,7 +527,7 @@ class InterviewExperience(Base):
     )
 
 
-class InterviewQuestion(Base):
+class InterviewQuestion(OperatorOwnedMixin, Base):
     """从面经中提炼的结构化问题"""
     __tablename__ = "interview_questions"
 
@@ -508,7 +545,7 @@ class InterviewQuestion(Base):
     experience: Mapped["InterviewExperience"] = relationship(back_populates="questions")
 
 
-class OptimizeSession(Base):
+class OptimizeSession(OperatorOwnedMixin, Base):
     """对话式简历优化会话"""
     __tablename__ = "optimize_sessions"
 
@@ -588,3 +625,804 @@ class SmartFillRunLog(Base):
     field_id: Mapped[str] = mapped_column(String(120), default="", index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     ts: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class AgentSession(Base):
+    """Universal Operator session state."""
+
+    __tablename__ = "agent_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    adapter: Mapped[str] = mapped_column(String(60), default="", index=True)
+    active_skill: Mapped[str] = mapped_column(String(120), default="")
+    current_step: Mapped[str] = mapped_column(String(120), default="")
+    current_job_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_resume_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_profile_section_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_application_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pending_proposal_ids: Mapped[list] = mapped_column(JSON, default=list)
+    pending_list_version: Mapped[int] = mapped_column(Integer, default=0)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    active_intent_scopes: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=None)
+    checkpoint_id: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentConversation(Base):
+    """Universal Operator conversation transcript and summary."""
+
+    __tablename__ = "agent_conversations"
+
+    conversation_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    messages_json: Mapped[list] = mapped_column(JSON, default=list)
+    conversation_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentMemory(Base):
+    """Universal Operator scoped memory entry."""
+
+    __tablename__ = "agent_memories"
+
+    memory_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    session_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    category: Mapped[str] = mapped_column(String(80), default="", index=True)
+    topic: Mapped[str] = mapped_column(String(160), default="", index=True)
+    skill: Mapped[str] = mapped_column(String(120), default="", index=True)
+    content_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentCapabilityLoadReceipt(Base):
+    """ORM model for AgentCapabilityLoadReceipt."""
+
+    __tablename__ = "agent_capability_load_receipts"
+
+    actor_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    capability_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    capability_name: Mapped[str] = mapped_column(String(160), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(80), primary_key=True)
+    schema_digest: Mapped[str] = mapped_column(String(64), index=True)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class AgentPlanDraft(Base):
+    """ORM model for AgentPlanDraft."""
+
+    __tablename__ = "agent_plan_drafts"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "session_id", "turn_key", name="uq_agent_plan_draft_turn"),
+    )
+
+    draft_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    turn_key: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(40), default="collecting", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    sealed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AgentPlanIntent(Base):
+    """ORM model for AgentPlanIntent."""
+
+    __tablename__ = "agent_plan_intents"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "canonical_effect_key", name="uq_agent_plan_intent_effect"),
+        UniqueConstraint("draft_id", "sequence", name="uq_agent_plan_intent_sequence"),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(ForeignKey("agent_plan_drafts.draft_id", ondelete="RESTRICT"), index=True)
+    canonical_effect_key: Mapped[str] = mapped_column(String(240))
+    sequence: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(40), default="active", index=True)
+    tool_name: Mapped[str] = mapped_column(String(120))
+    target_kind: Mapped[str] = mapped_column(String(40), default="")
+    target_name: Mapped[str] = mapped_column(String(160), default="")
+    record_id: Mapped[str] = mapped_column(String(160), default="")
+    atomic_group_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    base_version: Mapped[str] = mapped_column(String(160), default="")
+    args_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    args_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ProposalPlan(Base):
+    """ORM model for ProposalPlan."""
+
+    __tablename__ = "proposal_plans"
+    __table_args__ = (UniqueConstraint("lineage_id", "revision", name="uq_proposal_plan_lineage_revision"),)
+
+    plan_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(ForeignKey("agent_plan_drafts.draft_id", ondelete="RESTRICT"), unique=True, index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="sealed", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    lineage_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, index=True)
+    parent_plan_id: Mapped[Optional[str]] = mapped_column(ForeignKey("proposal_plans.plan_id", ondelete="RESTRICT"), nullable=True)
+    current_lineage_key: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, unique=True)
+    plan_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    immutable_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    replaced_by_plan_id: Mapped[Optional[str]] = mapped_column(ForeignKey("proposal_plans.plan_id", ondelete="RESTRICT"), nullable=True)
+    execution_started: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ConfirmationGroup(Base):
+    """ORM model for ConfirmationGroup."""
+
+    __tablename__ = "confirmation_groups"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "sequence", name="uq_confirmation_group_sequence"),
+        UniqueConstraint("plan_id", "group_id", name="uq_confirmation_group_plan_identity"),
+    )
+
+    group_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("proposal_plans.plan_id", ondelete="RESTRICT"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    # Immutable structural digest sealed into ProposalPlan.
+    group_digest: Mapped[str] = mapped_column(String(64))
+    # Snapshot-bound authorization digest; it must never rewrite group_digest.
+    authorization_digest: Mapped[str] = mapped_column(String(64), default="")
+    policy_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    dependency_group_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ConfirmationDecision(Base):
+    """ORM model for ConfirmationDecision."""
+
+    __tablename__ = "confirmation_decisions"
+    __table_args__ = (
+        UniqueConstraint("group_id", "sequence", name="uq_confirmation_decision_sequence"),
+        ForeignKeyConstraint(["plan_id", "group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    group_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    decision: Mapped[str] = mapped_column(String(20))
+    plan_digest: Mapped[str] = mapped_column(String(64))
+    group_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class OperationNode(Base):
+    """ORM model for OperationNode."""
+
+    __tablename__ = "operation_nodes"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "sequence", name="uq_operation_node_sequence"),
+        UniqueConstraint("plan_id", "node_id", name="uq_operation_node_plan_identity"),
+        ForeignKeyConstraint(["plan_id", "confirmation_group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    source_intent_ids: Mapped[list] = mapped_column(JSON, default=list)
+    tool_name: Mapped[str] = mapped_column(String(120))
+    target_kind: Mapped[str] = mapped_column(String(40), default="")
+    target_name: Mapped[str] = mapped_column(String(160), default="")
+    record_id: Mapped[str] = mapped_column(String(160), default="")
+    base_version: Mapped[str] = mapped_column(String(160), default="")
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    typed_outputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    execution_contract_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    execution_contract_digest: Mapped[str] = mapped_column(String(64), default="")
+    node_digest: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    confirmation_group_id: Mapped[str] = mapped_column(String(80), index=True)
+    atomic_group_id: Mapped[str] = mapped_column(String(80), default="")
+    risk_level: Mapped[int] = mapped_column(Integer, default=0)
+    compensation_policy: Mapped[str] = mapped_column(String(80), default="registry_only")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NodeDependency(Base):
+    """ORM model for NodeDependency."""
+
+    __tablename__ = "node_dependencies"
+    __table_args__ = (
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["plan_id", "depends_on_node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    depends_on_node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    output_name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    semantic_type: Mapped[str] = mapped_column(String(120))
+    reference_path: Mapped[str] = mapped_column(String(500), default="")
+
+
+class AtomicGroupExecutionClaim(Base):
+    """ORM model for AtomicGroupExecutionClaim."""
+
+    __tablename__ = "atomic_group_execution_claims"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "atomic_group_id", name="uq_atomic_group_execution_identity"),
+        ForeignKeyConstraint(
+            ["plan_id", "confirmation_group_id"],
+            ["confirmation_groups.plan_id", "confirmation_groups.group_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    atomic_group_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    confirmation_group_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    claim_token: Mapped[str] = mapped_column(String(120), default="", index=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class NodeExecutionReceipt(Base):
+    __tablename__ = "node_execution_receipts"
+    __table_args__ = (ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),)
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    input_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    claim_token: Mapped[str] = mapped_column(String(120), default="", index=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, unique=True)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    typed_outputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    receipt_schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    effect_manifest_schema_version: Mapped[int] = mapped_column(Integer, default=0)
+    effect_manifest_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    effect_manifest_digest: Mapped[str] = mapped_column(String(64), default="")
+    execution_contract_digest: Mapped[str] = mapped_column(String(64), default="")
+    before_version: Mapped[str] = mapped_column(String(160), default="")
+    after_version: Mapped[str] = mapped_column(String(160), default="")
+    write_occurred: Mapped[bool] = mapped_column(Boolean, default=False)
+    completion_reason: Mapped[str] = mapped_column(String(160), default="")
+    error_classification: Mapped[str] = mapped_column(String(40), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class NodeExecutionOutcome(Base):
+    """ORM model for NodeExecutionOutcome."""
+
+    __tablename__ = "node_execution_outcomes"
+    __table_args__ = (
+        UniqueConstraint("node_id", name="uq_node_execution_outcome_node"),
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["plan_id", "group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    outcome_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(80), index=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    group_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    receipt_schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    node_digest: Mapped[str] = mapped_column(String(64))
+    execution_contract_digest: Mapped[str] = mapped_column(String(64))
+    resolved_input_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    effect_state: Mapped[str] = mapped_column(String(40), default="no_effect", index=True)
+    completion_reason: Mapped[str] = mapped_column(String(160))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    public_result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    public_result_digest: Mapped[str] = mapped_column(String(64))
+    typed_outputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    typed_outputs_digest: Mapped[str] = mapped_column(String(64))
+    effect_manifest_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    effect_manifest_digest: Mapped[str] = mapped_column(String(64))
+    error_classification: Mapped[str] = mapped_column(String(40), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PlanGroupResultReceipt(Base):
+    """ORM model for PlanGroupResultReceipt."""
+
+    __tablename__ = "plan_group_result_receipts"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "group_id", name="uq_plan_group_result_identity"),
+        ForeignKeyConstraint(["plan_id", "group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    result_receipt_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    group_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    projection_schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    plan_digest: Mapped[str] = mapped_column(String(64))
+    group_digest: Mapped[str] = mapped_column(String(64))
+    node_outcome_set_digest: Mapped[str] = mapped_column(String(64))
+    canonical_result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    canonical_result_digest: Mapped[str] = mapped_column(String(64))
+    terminal_status: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ManualReviewCase(Base):
+    """ORM model for ManualReviewCase."""
+
+    __tablename__ = "manual_review_cases"
+    __table_args__ = (UniqueConstraint("dedupe_key", name="uq_manual_review_case_dedupe"),)
+
+    case_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(180), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    plan_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    group_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    node_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    proposal_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    reason_code: Mapped[str] = mapped_column(String(120), index=True)
+    subject_type: Mapped[str] = mapped_column(String(80), default="plan_execution")
+    effect_state: Mapped[str] = mapped_column(String(40), default="unknown_external", index=True)
+    evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    case_generation: Mapped[int] = mapped_column(Integer, default=1)
+    evidence_digest: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(40), default="open", index=True)
+    resolution_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    resolution_result_digest: Mapped[str] = mapped_column(String(64), default="")
+    resolution_event_digest: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ManualReviewResolution(Base):
+    """ORM model for ManualReviewResolution."""
+
+    __tablename__ = "manual_review_resolutions"
+    __table_args__ = (
+        UniqueConstraint("case_id", "sequence", name="uq_manual_review_resolution_sequence"),
+        UniqueConstraint("case_id", "idempotency_key", name="uq_manual_review_resolution_idempotency"),
+    )
+
+    resolution_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("manual_review_cases.case_id", name="fk_manual_review_resolution_case", ondelete="RESTRICT"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    resolution: Mapped[str] = mapped_column(String(80))
+    case_generation: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_digest: Mapped[str] = mapped_column(String(64), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), default="")
+    request_digest: Mapped[str] = mapped_column(String(64), default="")
+    evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_digest: Mapped[str] = mapped_column(String(64), default="")
+    event_id: Mapped[str] = mapped_column(String(120), default="")
+    event_digest: Mapped[str] = mapped_column(String(64), default="")
+    audit_id: Mapped[str] = mapped_column(String(80), default="")
+    retry_plan_id: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PlanRebaseReceipt(Base):
+    __tablename__ = "plan_rebase_receipts"
+    __table_args__ = (
+        UniqueConstraint("node_id", "event_key", name="uq_plan_rebase_event"),
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+    )
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    attempt: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    event_key: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    current_version: Mapped[str] = mapped_column(String(160), default="")
+    current_digest: Mapped[str] = mapped_column(String(64))
+    rebased_updates: Mapped[dict] = mapped_column(JSON, default=dict)
+    competing_fields: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NodeExecutionRevision(Base):
+    __tablename__ = "node_execution_revisions"
+    __table_args__ = (
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+    )
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    attempt: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    current_version: Mapped[str] = mapped_column(String(160), default="")
+    resolved_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    receipt_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SagaGroup(Base):
+    __tablename__ = "saga_groups"
+    plan_id: Mapped[str] = mapped_column(ForeignKey("proposal_plans.plan_id", ondelete="RESTRICT"), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class SagaCompensationReceipt(Base):
+    __tablename__ = "saga_compensation_receipts"
+    __table_args__ = (
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["plan_id"], ["saga_groups.plan_id"], ondelete="RESTRICT"),
+    )
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    operation: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    claim_token: Mapped[str] = mapped_column(String(120), default="", index=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(180), nullable=True, unique=True)
+    fence_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_classification: Mapped[str] = mapped_column(String(40), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class PlanNodeExecutionSnapshot(Base):
+    """ORM model for PlanNodeExecutionSnapshot."""
+
+    __tablename__ = "plan_node_execution_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(["plan_id", "node_id"], ["operation_nodes.plan_id", "operation_nodes.node_id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["plan_id", "confirmation_group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    confirmation_group_id: Mapped[str] = mapped_column(String(80), index=True)
+    tool_name: Mapped[str] = mapped_column(String(120))
+    model_or_action: Mapped[str] = mapped_column(String(120), default="")
+    record_id: Mapped[str] = mapped_column(String(160), default="")
+    risk_level: Mapped[int] = mapped_column(Integer, default=0)
+    locked_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    affected_records: Mapped[list] = mapped_column(JSON, default=list)
+    before: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    expected_version_or_hash: Mapped[str] = mapped_column(String(160), default="")
+    snapshot_digest: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ProposalCache(Base):
+    """ORM model for ProposalCache."""
+
+    __tablename__ = "proposal_cache"
+
+    proposal_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    confirmation_group_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    node_ids: Mapped[list] = mapped_column(JSON, default=list)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    risk_level: Mapped[int] = mapped_column(Integer, default=0)
+    operation_type: Mapped[str] = mapped_column(String(80), default="")
+    tool_name: Mapped[str] = mapped_column(String(120), default="")
+    model_or_action: Mapped[str] = mapped_column(String(120), default="")
+    record_id: Mapped[str] = mapped_column(String(120), default="")
+    affected_records: Mapped[list] = mapped_column(JSON, default=list)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    user_message_snapshot: Mapped[str] = mapped_column(Text, default="")
+    before: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    diff: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    locked_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    expected_version_or_hash: Mapped[str] = mapped_column(String(128), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), default="", index=True)
+    confirmation_events: Mapped[list] = mapped_column(JSON, default=list)
+    confirmation_invariant_version: Mapped[int] = mapped_column(Integer, default=0)
+    confirmation_count: Mapped[int] = mapped_column(Integer, default=0)
+    confirmations_required: Mapped[int] = mapped_column(Integer, default=0)
+    confirmations_received: Mapped[int] = mapped_column(Integer, default=0)
+    confirmation_challenges: Mapped[list] = mapped_column(JSON, default=list)
+    first_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    second_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    requires_second_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    confirmation_challenge: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    confirmation_text: Mapped[str] = mapped_column(Text, default="")
+
+
+class PlanGroupExecutionJob(Base):
+    """ORM model for PlanGroupExecutionJob."""
+
+    __tablename__ = "plan_group_execution_jobs"
+    __table_args__ = (
+        ForeignKeyConstraint(["plan_id", "group_id"], ["confirmation_groups.plan_id", "confirmation_groups.group_id"], ondelete="RESTRICT"),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("proposal_cache.proposal_id", ondelete="RESTRICT"), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(80), index=True)
+    group_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
+    claim_token: Mapped[str] = mapped_column(String(120), default="", index=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_receipt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("plan_group_result_receipts.result_receipt_id", name="fk_plan_group_execution_result_receipt", ondelete="RESTRICT"), nullable=True, default=None, index=True)
+    result_digest: Mapped[str] = mapped_column(String(64), default="")
+    error_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ProposalContinuation(Base):
+    """ORM model for ProposalContinuation."""
+
+    __tablename__ = "proposal_continuations"
+
+    proposal_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    confirmed_event_id: Mapped[str] = mapped_column(String(120), unique=True)
+    invocation_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result_receipt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("plan_group_result_receipts.result_receipt_id", name="fk_proposal_continuation_result_receipt", ondelete="RESTRICT"), nullable=True, default=None, index=True)
+    result_digest: Mapped[str] = mapped_column(String(64), default="")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_token: Mapped[str] = mapped_column(String(80), default="")
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentContinuationInvocation(Base):
+    """ORM model for AgentContinuationInvocation."""
+    __tablename__ = "agent_continuation_invocations"
+    invocation_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
+    lease_token: Mapped[str] = mapped_column(String(80), default="")
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AgentSessionExecutionLease(Base):
+    """ORM model for AgentSessionExecutionLease."""
+
+    __tablename__ = "agent_session_execution_leases"
+
+    actor_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_invocation_key: Mapped[str] = mapped_column(String(160), default="", index=True)
+    lease_token: Mapped[str] = mapped_column(String(80), default="")
+    generation: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentToolInvocationReceipt(Base):
+    """ORM model for AgentToolInvocationReceipt."""
+
+    __tablename__ = "agent_tool_invocation_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "invocation_key",
+            "tool_call_id",
+            name="uq_agent_tool_invocation_receipt_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    invocation_key: Mapped[str] = mapped_column(String(160), index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(160))
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    tool_name: Mapped[str] = mapped_column(String(120))
+    action: Mapped[str] = mapped_column(String(160), default="")
+    args_hash: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
+    result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AgentAuditLog(Base):
+    """ORM model for AgentAuditLog."""
+
+    __tablename__ = "agent_audit_logs"
+
+    audit_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    session_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    adapter: Mapped[str] = mapped_column(String(60), default="", index=True)
+    request_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(120), default="")
+    user_message: Mapped[str] = mapped_column(Text, default="")
+    tool_name: Mapped[str] = mapped_column(String(120), default="")
+    args_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    args_redacted: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_level: Mapped[int] = mapped_column(Integer, default=0)
+    proposal_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    confirmation_event_id: Mapped[str] = mapped_column(String(120), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), default="", index=True)
+    confirmation_status: Mapped[str] = mapped_column(String(60), default="")
+    result_status: Mapped[str] = mapped_column(String(60), default="")
+    result_summary: Mapped[str] = mapped_column(Text, default="")
+    changed_records: Mapped[list] = mapped_column(JSON, default=list)
+    result_receipt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("plan_group_result_receipts.result_receipt_id", name="fk_agent_audit_result_receipt", ondelete="RESTRICT"), nullable=True, default=None, index=True)
+    result_digest: Mapped[str] = mapped_column(String(64), default="")
+    before_version_or_hash: Mapped[str] = mapped_column(String(128), default="")
+    after_version_or_hash: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    error: Mapped[str] = mapped_column(Text, default="")
+
+
+class AgentCheckpoint(Base):
+    """ORM model for AgentCheckpoint."""
+
+    __tablename__ = "agent_checkpoints"
+
+    checkpoint_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    active_skill: Mapped[str] = mapped_column(String(120), default="")
+    current_step: Mapped[str] = mapped_column(String(120), default="")
+    current_job_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_resume_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_profile_section_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_application_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pending_proposal_ids: Mapped[list] = mapped_column(JSON, default=list)
+    state_blob: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+
+
+class HarnessSession(Base):
+    """ORM model for HarnessSession."""
+
+    __tablename__ = "harness_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    adapter: Mapped[str] = mapped_column(String(60), default="", index=True)
+    phase: Mapped[str] = mapped_column(String(60), default="idle", index=True)
+    phase_token: Mapped[str] = mapped_column(String(120), default="", index=True)
+    active_turn_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    last_entry_seq: Mapped[int] = mapped_column(Integer, default=0)
+    current_save_point_id: Mapped[str] = mapped_column(String(120), default="")
+    pending_writes: Mapped[list] = mapped_column(JSON, default=list)
+    recovery_status: Mapped[str] = mapped_column(String(60), default="clean", index=True)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class HarnessEntry(Base):
+    """ORM model for HarnessEntry."""
+
+    __tablename__ = "harness_entries"
+    __table_args__ = (UniqueConstraint("session_id", "seq", name="uq_harness_entries_session_seq"),)
+
+    entry_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    seq: Mapped[int] = mapped_column(Integer, index=True)
+    turn_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    phase: Mapped[str] = mapped_column(String(60), default="", index=True)
+    event_type: Mapped[str] = mapped_column(String(120), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class HarnessTurnSnapshot(Base):
+    """ORM model for HarnessTurnSnapshot."""
+
+    __tablename__ = "harness_turn_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    turn_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    phase: Mapped[str] = mapped_column(String(60), default="")
+    last_entry_seq: Mapped[int] = mapped_column(Integer, default=0)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    pending_writes: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class HarnessSavePoint(Base):
+    """ORM model for HarnessSavePoint."""
+
+    __tablename__ = "harness_save_points"
+
+    save_point_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), default=LOCAL_DEFAULT_ACTOR_ID, index=True)
+    turn_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    phase: Mapped[str] = mapped_column(String(60), default="")
+    last_entry_seq: Mapped[int] = mapped_column(Integer, default=0)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    pending_writes: Mapped[list] = mapped_column(JSON, default=list)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AgentTreeEntry(Base):
+    """ORM model for AgentTreeEntry."""
+
+    __tablename__ = "agent_tree_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "invocation_key",
+            "invocation_sequence",
+            name="uq_agent_tree_entries_invocation_sequence",
+        ),
+    )
+
+    ord: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    actor_id: Mapped[str] = mapped_column(String(128), index=True)
+    parent_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    entry_type: Mapped[str] = mapped_column(String(40))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    invocation_key: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, index=True)
+    invocation_sequence: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

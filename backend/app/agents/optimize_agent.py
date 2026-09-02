@@ -403,8 +403,14 @@ async def list_sessions_from_db(db) -> list[dict]:
     ]
 
 
-async def get_session_detail(session_id: str, db) -> dict | None:
-    """获取完整会话详情，包含对话历史"""
+async def get_session_detail(session_id: str, db, actor=None) -> dict | None:
+    """获取完整会话详情，包含对话历史。
+
+    actor 提供时（已通过 browser principal / actor-session 授权绑定）追加 durable
+    恢复投影：pending Plan/Group/proposal 卡片与 plan_status 信封。legacy
+    `pending_action_json` 不再是权威，也不作为可操作确认请求返回——确认只能来自
+    durable proposal/plan 状态。
+    """
     from app.models.models import OptimizeSession as OptimizeSessionModel
     from sqlalchemy import select
 
@@ -415,7 +421,7 @@ async def get_session_detail(session_id: str, db) -> dict | None:
     if not row:
         return None
 
-    return {
+    detail: dict = {
         "session_id": row.session_id,
         "phase": row.phase,
         "job_ids": row.job_ids or [],
@@ -424,8 +430,23 @@ async def get_session_detail(session_id: str, db) -> dict | None:
         "created_at": row.created_at.isoformat() if row.created_at else "",
         "updated_at": row.updated_at.isoformat() if row.updated_at else "",
         "resume_id": row.resume_id,
-        "pending_action": row.pending_action_json or None,
     }
+    if actor is not None:
+        from app.operator.plan_runtime import (
+            PlanMaterializationError,
+            pending_plan_bootstrap,
+        )
+
+        try:
+            bootstrap = await pending_plan_bootstrap(db, actor)
+        except PlanMaterializationError as exc:
+            bootstrap = {
+                "proposals": [],
+                "plan_events": [],
+                "recovery_error": str(exc),
+            }
+        detail["durable"] = bootstrap
+    return detail
 
 
 async def delete_session(session_id: str, db) -> bool:

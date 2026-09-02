@@ -26,6 +26,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       ...options,
     });
@@ -33,7 +34,17 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`无法连接本地后端 ${API_BASE}，请确认后端服务已启动。原始错误：${reason}`);
   }
-  if (!res.ok) throw new Error(`API Error: ${res.status}`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const payload: unknown = await res.json();
+      const raw = (payload as { detail?: unknown } | null)?.detail ?? payload;
+      detail = typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
+    } catch {
+      detail = "";
+    }
+    throw new Error(`API Error: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
   return res.json();
 }
 
@@ -60,7 +71,7 @@ export const jobsApi = {
 
   patch: (
     id: number,
-    data: { triage_status?: "inbox" | "picked" | "ignored"; pool_id?: number; clear_pool?: boolean }
+    data: { triage_status?: "inbox" | "picked" | "ignored"; user_notes?: string; pool_id?: number; clear_pool?: boolean }
   ) =>
     request(`/api/jobs/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
 
@@ -177,6 +188,45 @@ export interface HarnessAgentMessage {
   content: string;
 }
 
+export type AgentContentBlock =
+  | { type: "text"; text: string; details?: unknown }
+  | { type: "thinking"; thinking: string; details?: unknown }
+  | { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown>; details?: unknown }
+  | { type: "image"; url: string; mime_type?: string; details?: unknown };
+
+export type AgentMessage =
+  | { role: "user"; content: AgentContentBlock[]; timestamp?: number; details?: unknown }
+  | {
+      role: "assistant";
+      content: AgentContentBlock[];
+      stop_reason?: string | null;
+      usage?: Record<string, unknown> | null;
+      model?: string;
+      provider?: string;
+      error_message?: string | null;
+      timestamp?: number;
+      details?: unknown;
+    }
+  | {
+      role: "toolResult";
+      tool_call_id: string;
+      tool_name: string;
+      content: AgentContentBlock[];
+      is_error?: boolean;
+      timestamp?: number;
+      details?: unknown;
+    }
+  | { role: "compactionSummary"; summary: string; tokens_before?: number; timestamp?: number; details?: unknown }
+  | { role: "branchSummary"; summary: string; from_id?: string; timestamp?: number; details?: unknown }
+  | {
+      role: "custom";
+      custom_type?: string;
+      content: string | AgentContentBlock[];
+      display?: boolean;
+      timestamp?: number;
+      details?: unknown;
+    };
+
 export interface HarnessAgentToolCall {
   tool: string;
   args: Record<string, unknown>;
@@ -257,12 +307,25 @@ export interface HarnessAgentConversationDetail {
   messages: HarnessAgentMessage[];
 }
 
+export interface HarnessAgentSessionBootstrap {
+  proposals: Record<string, unknown>[];
+  plan_events: AgentStreamEvent[];
+}
+
 export interface HarnessAgentResponse {
+  ok?: boolean;
+  conversation_id?: string;
   assistant_message: string;
-  mode: string;
-  requires_confirmation: boolean;
-  tool_calls: HarnessAgentToolCall[];
-  proposed_actions: HarnessAgentProposedAction[];
+  proposals?: Record<string, unknown>[];
+  cards?: unknown[];
+  stop_reason?: string;
+  incomplete_turn?: boolean;
+  incomplete_assistant_message?: string;
+  error?: unknown;
+  mode?: string;
+  requires_confirmation?: boolean;
+  tool_calls?: HarnessAgentToolCall[];
+  proposed_actions?: HarnessAgentProposedAction[];
   career_paths?: HarnessAgentCareerPath[];
   job_cards?: HarnessAgentJobCard[];
   next_steps?: string[];
@@ -275,17 +338,336 @@ export interface HarnessAgentResponse {
   memory_snapshot?: HarnessAgentMemorySnapshot;
   alerts?: HarnessAgentAlert[];
   proactive_suggestions?: HarnessAgentProactiveSuggestion[];
-  conversation_id?: string;
   conversation_title?: string;
 }
 
+export interface HarnessAgentChatRequest {
+  messages: HarnessAgentMessage[];
+  memory?: Record<string, any>;
+  conversation_id?: string | null;
+  page_context?: Record<string, any> | string | null;
+}
+
+export type AgentEventType =
+  | "agent_start"
+  | "turn_start"
+  | "message_start"
+  | "message_update"
+  | "message_end"
+  | "tool_execution_start"
+  | "tool_execution_update"
+  | "tool_execution_end"
+  | "turn_end"
+  | "agent_end"
+  | "proposal"
+  | "plan_status"
+  | "card"
+  | "compaction"
+  | "final"
+  | "error";
+
+export interface PlanGroupExecutionEvent {
+  [key: string]: unknown;
+  group_id: string;
+  status: string;
+  group_digest?: string;
+  result_receipt_id?: string;
+  result_digest?: string;
+  confirmations_required?: number;
+  confirmations_received?: number;
+  authorized_at?: string;
+}
+
+export interface PlanNodeExecutionEvent {
+  [key: string]: unknown;
+  node_id: string;
+  status: string;
+  confirmation_group_id?: string;
+  atomic_group_id?: string;
+  receipt_status?: string;
+  write_occurred?: boolean;
+  completion_reason?: string;
+  execution_started_at?: string;
+  outcome_id?: string;
+  execution_contract_digest?: string;
+  effect_manifest_digest?: string;
+  effect_state?: "committed" | "no_effect" | "rolled_back" | "unknown_external" | "legacy_unproven" | string;
+  manual_review_case_id?: string;
+}
+
+export type AgentStreamEvent =
+  | ({ type: "agent_start" | "turn_start" | "turn_end" | "agent_end" } & Record<string, any>)
+  | ({ type: "message_start" | "message_end"; message?: AgentMessage } & Record<string, any>)
+  | ({ type: "message_update"; message?: AgentMessage; delta?: Record<string, any> } & Record<string, any>)
+  | ({
+      type: "tool_execution_start" | "tool_execution_update" | "tool_execution_end";
+      tool_call_id?: string;
+      toolCallId?: string;
+      tool_name?: string;
+      toolName?: string;
+      args?: Record<string, unknown>;
+      partial_result?: unknown;
+      result?: unknown;
+      is_error?: boolean;
+    } & Record<string, any>)
+  | ({
+      type: "proposal";
+      proposal_id?: string;
+      risk?: unknown;
+      summary?: string;
+      affected_records?: unknown[];
+      proposal?: Record<string, unknown>;
+    } & Record<string, any>)
+  | ({ type: "plan_status"; plan_id?: string; status?: string; groups?: PlanGroupExecutionEvent[]; nodes?: PlanNodeExecutionEvent[]; completion_reason?: string } & Record<string, any>)
+  | ({ type: "card"; card?: unknown } & Record<string, any>)
+  | ({ type: "compaction" } & Record<string, any>)
+  | ({ type: "final" } & HarnessAgentResponse & Record<string, any>)
+  | ({ type: "error"; error?: unknown; message?: string } & Record<string, any>);
+
+export type AgentStreamHandlers = Partial<{
+  [K in AgentEventType]: (event: Extract<AgentStreamEvent, { type: K }>) => void;
+}> & {
+  onEvent?: (event: AgentStreamEvent) => void;
+  onError?: (error: Error) => void;
+  onFinal?: (event: Extract<AgentStreamEvent, { type: "final" }>) => void;
+};
+
+export interface AgentTreeEntry {
+  entry_id: string;
+  parent_id?: string | null;
+  entry_type: string;
+  created_at: string;
+  preview: string;
+}
+
+export interface AgentTreeMessage {
+  entry_id?: string | null;
+  role: AgentMessage["role"] | "user" | "assistant" | string;
+  content: string;
+  message?: AgentMessage | Record<string, unknown>;
+}
+
+export interface AgentConversationTree {
+  entries: AgentTreeEntry[];
+  leaf_id?: string | null;
+  messages?: AgentTreeMessage[];
+}
+
+export interface AgentTreeNavigateResponse {
+  ok: boolean;
+  conversation_id?: string;
+  leaf_id?: string;
+  warning?: unknown;
+  error?: unknown;
+}
+
+export interface ProposalDecisionResponse {
+  ok?: boolean;
+  proposal_id?: string;
+  status?: string;
+  continuation?: HarnessAgentResponse;
+  next_proposals?: Record<string, unknown>[];
+  resolved_proposal_ids?: string[];
+  plan_event?: AgentStreamEvent;
+  plan_status?: string;
+  confirmation_challenge?: string;
+  confirmations_required?: number;
+  confirmations_received?: number;
+  remaining?: number;
+  [key: string]: unknown;
+}
+
+export type ManualReviewResolution =
+  | "effect_absent_retry"
+  | "effect_present_accept"
+  | "compensation_completed"
+  | "abort_plan";
+
+export interface ManualReviewCase {
+  [key: string]: unknown;
+  case_id: string;
+  session_id?: string;
+  plan_id?: string;
+  group_id?: string;
+  node_id?: string;
+  proposal_id?: string;
+  status?: string;
+  reason_code?: string;
+  reason?: unknown;
+  subject_type?: string;
+  effect_state?: string;
+  effect?: unknown;
+  evidence?: unknown;
+  evidence_json?: unknown;
+  case_generation?: number;
+  evidence_digest?: string;
+  resolution?: ManualReviewResolution | string;
+}
+
+export interface ManualReviewResolveRequest {
+  session_id: string;
+  resolution: ManualReviewResolution;
+  case_generation: number;
+  evidence_digest: string;
+  idempotency_key: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface ManualReviewResolutionResponse {
+  [key: string]: unknown;
+  case_id?: string;
+  status?: string;
+  resolution?: ManualReviewResolution | string;
+  case?: ManualReviewCase;
+  manual_review_case?: ManualReviewCase;
+  plan_event?: AgentStreamEvent;
+  retry_plan_id?: string;
+  recovery_plan_id?: string;
+  recovery?: Record<string, unknown>;
+  next_proposals?: Record<string, unknown>[];
+}
+
+const AGENT_EVENT_TYPES = new Set<AgentEventType>([
+  "agent_start",
+  "turn_start",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "turn_end",
+  "agent_end",
+  "proposal",
+  "plan_status",
+  "card",
+  "compaction",
+  "final",
+  "error",
+]);
+
+function isAgentEventType(value: string): value is AgentEventType {
+  return AGENT_EVENT_TYPES.has(value as AgentEventType);
+}
+
+function findSseBoundary(text: string) {
+  const unix = text.indexOf("\n\n");
+  const windows = text.indexOf("\r\n\r\n");
+  if (unix === -1) return windows;
+  if (windows === -1) return unix;
+  return Math.min(unix, windows);
+}
+
+function parseSseBlock(block: string): { eventType: string; dataText: string } | null {
+  let eventType = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("event:")) {
+      eventType = line.slice(6).trim() || "message";
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (dataLines.length === 0) return null;
+  return { eventType, dataText: dataLines.join("\n") };
+}
+
+function dispatchAgentEvent(event: AgentStreamEvent, handlers: AgentStreamHandlers) {
+  handlers.onEvent?.(event);
+  if (event.type === "final") handlers.onFinal?.(event);
+  const handler = handlers[event.type] as ((event: AgentStreamEvent) => void) | undefined;
+  handler?.(event);
+}
+
+async function streamAgentEndpoint(
+  path: string,
+  body: Record<string, unknown>,
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal
+) {
+  let finalSeen = false;
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.detail?.error || errBody?.detail || `Agent stream failed (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    const emitBlock = (block: string) => {
+      const parsedBlock = parseSseBlock(block);
+      if (!parsedBlock) return;
+      let parsed: any;
+      try {
+        parsed = JSON.parse(parsedBlock.dataText);
+      } catch (error) {
+        handlers.onError?.(new Error(`Agent stream JSON parse failed: ${String(error)}`));
+        return;
+      }
+      const type = String(parsed.type || parsed.event || parsedBlock.eventType || "");
+      if (!isAgentEventType(type)) return;
+      const event = { ...parsed, type } as AgentStreamEvent;
+      if (event.type === "final") finalSeen = true;
+      dispatchAgentEvent(event, handlers);
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = findSseBoundary(buffer);
+      while (boundary >= 0) {
+        const separatorLength = buffer.slice(boundary, boundary + 4) === "\r\n\r\n" ? 4 : 2;
+        const block = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + separatorLength);
+        if (block) emitBlock(block);
+        boundary = findSseBoundary(buffer);
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) emitBlock(tail);
+  } catch (error) {
+    if (signal?.aborted) return;
+    const err = error instanceof Error ? error : new Error(String(error));
+    handlers.onError?.(err);
+    if (!finalSeen) throw err;
+  }
+}
+
+export function agentChatStream(
+  data: HarnessAgentChatRequest,
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal
+) {
+  return streamAgentEndpoint("/api/harness-agent/chat/stream", data as unknown as Record<string, unknown>, handlers, signal);
+}
+
+export function optimizeAgentChatStream(
+  data: { session_id: string; message: string; action?: string; feedback?: string },
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal
+) {
+  return streamAgentEndpoint("/api/optimize/agent/chat/stream", data as Record<string, unknown>, handlers, signal);
+}
+
+function manualReviewCaseFromPayload(payload: ManualReviewCase | { case?: ManualReviewCase; manual_review_case?: ManualReviewCase }): ManualReviewCase {
+  const envelope = payload as { case?: ManualReviewCase; manual_review_case?: ManualReviewCase };
+  const reviewCase = envelope.case || envelope.manual_review_case || payload as ManualReviewCase;
+  if (!reviewCase.case_id) throw new Error("Manual-review case response is missing case_id");
+  return reviewCase;
+}
+
 export const harnessAgentApi = {
-  chat: (data: {
-    messages: HarnessAgentMessage[];
-    confirmed_action_ids?: string[];
-    memory?: Record<string, any>;
-    conversation_id?: string | null;
-  }) =>
+  chat: (data: HarnessAgentChatRequest) =>
     request<HarnessAgentResponse>("/api/harness-agent/chat", {
       method: "POST",
       body: JSON.stringify(data),
@@ -294,6 +676,10 @@ export const harnessAgentApi = {
     request<{ conversations: HarnessAgentConversationSummary[] }>("/api/harness-agent/conversations"),
   conversation: (id: string) =>
     request<HarnessAgentConversationDetail>(`/api/harness-agent/conversations/${encodeURIComponent(id)}`),
+  sessionBootstrap: (sessionId: string) =>
+    request<HarnessAgentSessionBootstrap>(
+      `/api/harness-agent/sessions/${encodeURIComponent(sessionId)}/bootstrap`
+    ),
   deleteConversation: (id: string) =>
     request<{ ok: boolean }>(`/api/harness-agent/conversations/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -307,7 +693,46 @@ export const harnessAgentApi = {
       method: "POST",
       body: JSON.stringify({ content }),
     }),
+  confirmProposal: (proposalId: string, sessionId: string, body?: Record<string, unknown>) =>
+    request<ProposalDecisionResponse>(`/api/harness-agent/proposals/${encodeURIComponent(proposalId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ ...(body || {}), operator_session_id: sessionId }),
+    }),
+  rejectProposal: (proposalId: string, sessionId: string, body?: Record<string, unknown>) =>
+    request<ProposalDecisionResponse>(`/api/harness-agent/proposals/${encodeURIComponent(proposalId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ ...(body || {}), operator_session_id: sessionId }),
+    }),
+  listManualReviewCases: async (sessionId: string): Promise<ManualReviewCase[]> => {
+    const payload = await request<ManualReviewCase[] | { cases?: ManualReviewCase[] }>(
+      `/api/harness-agent/manual-review-cases?${buildQuery({ session_id: sessionId })}`
+    );
+    return Array.isArray(payload) ? payload : payload.cases || [];
+  },
+  getManualReviewCase: async (caseId: string, sessionId: string): Promise<ManualReviewCase> => {
+    const payload = await request<ManualReviewCase | { case?: ManualReviewCase; manual_review_case?: ManualReviewCase }>(
+      `/api/harness-agent/manual-review-cases/${encodeURIComponent(caseId)}?${buildQuery({ session_id: sessionId })}`
+    );
+    return manualReviewCaseFromPayload(payload);
+  },
+  resolveManualReviewCase: (caseId: string, body: ManualReviewResolveRequest) =>
+    request<ManualReviewResolutionResponse>(
+      `/api/harness-agent/manual-review-cases/${encodeURIComponent(caseId)}/resolve`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+  getConversationTree: (id: string) =>
+    request<AgentConversationTree>(`/api/harness-agent/conversations/${encodeURIComponent(id)}/tree`),
+  navigateConversationTree: (id: string, entryId: string) =>
+    request<AgentTreeNavigateResponse>(`/api/harness-agent/conversations/${encodeURIComponent(id)}/tree/navigate`, {
+      method: "POST",
+      body: JSON.stringify({ entry_id: entryId }),
+    }),
 };
+
+export const confirmProposal = harnessAgentApi.confirmProposal;
+export const rejectProposal = harnessAgentApi.rejectProposal;
+export const getConversationTree = harnessAgentApi.getConversationTree;
+export const navigateConversationTree = harnessAgentApi.navigateConversationTree;
 
 // ---- Profile API ----
 export interface ProfileAgentPatch {

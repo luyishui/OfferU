@@ -55,6 +55,22 @@ def _to_internal_status(status: str) -> str:
     return value
 
 
+async def _ensure_picked_canonical_application(db: AsyncSession, job: Job) -> None:
+    """Job picked → Application lifecycle transition semantics.
+
+    A job entering application tracking (triage_status=picked) is guaranteed by
+    the workspace convention to have exactly one canonical Application row
+    starting at pending (待投递). Only the creation side runs here: existing
+    Applications are never force-transitioned, and unpicking a job never
+    deletes or changes an Application (no guessing).
+    """
+    if str(job.triage_status or "") != "picked":
+        return
+    from app.services.application_workspace import ensure_canonical_application_for_job
+
+    await ensure_canonical_application_for_job(db, job=job)
+
+
 def _status_filter_values(status: str) -> list[str]:
     internal = _to_internal_status(status)
     if internal == "inbox":
@@ -162,6 +178,7 @@ class JobPatchRequest(BaseModel):
     """单岗位分拣更新请求"""
 
     triage_status: Optional[str] = None
+    user_notes: Optional[str] = Field(default=None, max_length=10000)
     pool_id: Optional[int] = None
     clear_pool: bool = False
 
@@ -406,6 +423,9 @@ async def patch_jobs_batch(data: JobBatchPatchRequest, db: AsyncSession = Depend
 
         updated += 1
 
+    for job in jobs:
+        await _ensure_picked_canonical_application(db, job)
+
     await db.commit()
     return {"updated": updated, "pool_name": pool.name if pool else None}
 
@@ -446,7 +466,12 @@ async def delete_jobs_batch(data: JobBatchDeleteRequest, db: AsyncSession = Depe
 @router.patch("/{job_id}")
 async def patch_job(job_id: int, data: JobPatchRequest, db: AsyncSession = Depends(get_db)):
     """更新单个岗位的分拣状态与池归属"""
-    if data.triage_status is None and data.pool_id is None and not data.clear_pool:
+    if (
+        data.triage_status is None
+        and data.user_notes is None
+        and data.pool_id is None
+        and not data.clear_pool
+    ):
         raise HTTPException(status_code=400, detail="no update fields provided")
 
     triage_status = _to_internal_status(data.triage_status) if data.triage_status else None
@@ -467,6 +492,9 @@ async def patch_job(job_id: int, data: JobPatchRequest, db: AsyncSession = Depen
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    if data.user_notes is not None:
+        job.user_notes = data.user_notes
+
     if triage_status is not None:
         job.triage_status = triage_status
         if triage_status != "picked":
@@ -485,6 +513,7 @@ async def patch_job(job_id: int, data: JobPatchRequest, db: AsyncSession = Depen
     if clear_pool:
         job.pool_id = None
 
+    await _ensure_picked_canonical_application(db, job)
     await db.commit()
     await db.refresh(job)
     return _job_to_dict(job)
@@ -812,6 +841,7 @@ def _job_to_dict(job: Job) -> dict:
         "apply_url": job.apply_url or "",
         "source": job.source,
         "raw_description": job.raw_description or "",
+        "user_notes": job.user_notes or "",
         "posted_at": str(job.posted_at) if job.posted_at else None,
         "summary": job.summary,
         "keywords": job.keywords or [],

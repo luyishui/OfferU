@@ -8,13 +8,19 @@ from typing import Any
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.operator.application_lifecycle import (
+    ApplicationLifecycleError,
+    ApplicationLifecycleSpec,
+)
 from app.models.models import (
+    Application,
     ApplicationRecord,
     ApplicationTable,
     ApplicationTableRecord,
     ApplicationTemplate,
     ApplicationWorkspaceSettings,
     Job,
+    LOCAL_DEFAULT_ACTOR_ID,
 )
 
 FIELD_TYPES = {
@@ -356,7 +362,7 @@ async def _get_total_table(db: AsyncSession) -> ApplicationTable:
     return table
 
 
-async def ensure_workspace_bootstrap(db: AsyncSession) -> None:
+async def _ensure_workspace_bootstrap(db: AsyncSession, *, commit: bool) -> None:
     await _get_settings(db)
     template = await _get_template(db)
     total_table = await _get_total_table(db)
@@ -375,7 +381,14 @@ async def ensure_workspace_bootstrap(db: AsyncSession) -> None:
                 schema_json=copy.deepcopy(template.schema_json),
             )
         )
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
+
+
+async def ensure_workspace_bootstrap(db: AsyncSession) -> None:
+    await _ensure_workspace_bootstrap(db, commit=True)
 
 
 async def recompute_duplicate_flags(db: AsyncSession) -> None:
@@ -444,8 +457,13 @@ async def get_workspace_payload(db: AsyncSession) -> dict[str, Any]:
     }
 
 
-async def get_table_or_raise(db: AsyncSession, table_id: int) -> ApplicationTable:
-    await ensure_workspace_bootstrap(db)
+async def _get_table_or_raise(
+    db: AsyncSession,
+    table_id: int,
+    *,
+    commit_bootstrap: bool,
+) -> ApplicationTable:
+    await _ensure_workspace_bootstrap(db, commit=commit_bootstrap)
     table = (
         await db.execute(select(ApplicationTable).where(ApplicationTable.id == table_id))
     ).scalars().first()
@@ -453,6 +471,10 @@ async def get_table_or_raise(db: AsyncSession, table_id: int) -> ApplicationTabl
         raise ValueError("目标表不存在")
     table.schema_json = _normalize_schema(table.schema_json)
     return table
+
+
+async def get_table_or_raise(db: AsyncSession, table_id: int) -> ApplicationTable:
+    return await _get_table_or_raise(db, table_id, commit_bootstrap=True)
 
 
 async def list_table_records(
@@ -584,6 +606,70 @@ def _build_fixed_values_from_job(job: Job) -> dict[str, Any]:
     return values
 
 
+def _canonical_apply_status_value(value: Any) -> str | None:
+    """Resolve a workspace apply_status value (label or interview round) to the
+    canonical lifecycle state through the single ApplicationLifecycleSpec
+    authority. Unresolvable values fail closed and return None so the storage
+    layer never guesses a canonical state."""
+    try:
+        return ApplicationLifecycleSpec.resolve_state(value)
+    except ApplicationLifecycleError:
+        return None
+
+
+async def ensure_canonical_application_for_job(db: AsyncSession, *, job: Any) -> Application:
+    """Return the canonical Application row for a job, creating it when absent.
+
+    Idempotent and owner/job-scoped. When a row must be created it follows the
+    existing workspace semantics: entering application tracking starts at
+    pending (待投递). An existing Application is always returned with its
+    status untouched — no forced transition.
+
+    The (owner_actor_id, job_id) uniqueness is guaranteed by the
+    ``uq_applications_owner_job`` unique index (installed for legacy databases
+    by the startup migration, declared on the model for fresh databases).  If a
+    concurrent writer wins the insert race, this call re-reads the winner's row
+    instead of failing — exactly one canonical Application can ever exist per
+    (owner, job).
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    existing = (
+        await db.execute(
+            select(Application).where(
+                Application.owner_actor_id == job.owner_actor_id,
+                Application.job_id == job.id,
+            ).order_by(Application.id.asc())
+        )
+    ).scalars().first()
+    if existing is not None:
+        return existing
+    try:
+        async with db.begin_nested():
+            application = Application(
+                owner_actor_id=job.owner_actor_id,
+                job_id=job.id,
+                status=ApplicationLifecycleSpec.resolve_state("pending"),
+            )
+            db.add(application)
+            await db.flush()
+        return application
+    except IntegrityError:
+        # Lost the insert race to a concurrent canonical Application; re-read
+        # the winner instead of creating a shadow row or crashing.
+        winner = (
+            await db.execute(
+                select(Application).where(
+                    Application.owner_actor_id == job.owner_actor_id,
+                    Application.job_id == job.id,
+                ).order_by(Application.id.asc())
+            )
+        ).scalars().first()
+        if winner is None:
+            raise
+        return winner
+
+
 def _extract_record_payload(values: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     fixed = {
         "company_name": str(values.get("company_name") or "").strip(),
@@ -621,10 +707,14 @@ async def _create_record_no_commit(
     total_table: ApplicationTable,
     values: dict[str, Any],
     job_ref_id: int | None,
+    owner_actor_id: str | None = None,
 ) -> ApplicationRecord:
     fixed, custom = _extract_record_payload(values)
+    canonical_status = _canonical_apply_status_value(custom.get("apply_status")) or "pending"
     record = ApplicationRecord(
+        owner_actor_id=owner_actor_id or LOCAL_DEFAULT_ACTOR_ID,
         job_ref_id=job_ref_id,
+        apply_status=canonical_status,
         company_name=fixed["company_name"],
         job_title=fixed["job_title"],
         location=fixed["location"],
@@ -676,10 +766,47 @@ async def create_records_from_jobs(
     job_ids: list[int],
     skip_existing_in_table: bool = False,
 ) -> dict[str, Any]:
+    return await _create_records_from_jobs_impl(
+        db,
+        table_id=table_id,
+        job_ids=job_ids,
+        skip_existing_in_table=skip_existing_in_table,
+        owner_actor_id=None,
+        commit=True,
+    )
+
+
+async def create_records_from_jobs_no_commit(
+    db: AsyncSession,
+    *,
+    table_id: int,
+    job_ids: list[int],
+    skip_existing_in_table: bool = False,
+    owner_actor_id: str | None = None,
+) -> dict[str, Any]:
+    return await _create_records_from_jobs_impl(
+        db,
+        table_id=table_id,
+        job_ids=job_ids,
+        skip_existing_in_table=skip_existing_in_table,
+        owner_actor_id=owner_actor_id,
+        commit=False,
+    )
+
+
+async def _create_records_from_jobs_impl(
+    db: AsyncSession,
+    *,
+    table_id: int,
+    job_ids: list[int],
+    skip_existing_in_table: bool,
+    owner_actor_id: str | None,
+    commit: bool,
+) -> dict[str, Any]:
     if not job_ids:
         raise ValueError("job_ids 不能为空")
 
-    target_table = await get_table_or_raise(db, table_id)
+    target_table = await _get_table_or_raise(db, table_id, commit_bootstrap=commit)
     total_table = await _get_total_table(db)
 
     jobs = (
@@ -722,13 +849,28 @@ async def create_records_from_jobs(
             total_table=total_table,
             values=values,
             job_ref_id=job.id,
+            owner_actor_id=owner_actor_id,
         )
         created_records.append(record)
 
     await recompute_duplicate_flags(db)
-    await db.commit()
-    for record in created_records:
-        await db.refresh(record)
+    if commit:
+        await db.commit()
+        for record in created_records:
+            await db.refresh(record)
+    else:
+        await db.flush()
+        if created_records:
+            created_ids = [int(record.id) for record in created_records]
+            refreshed_records = (
+                await db.execute(
+                    select(ApplicationRecord)
+                    .where(ApplicationRecord.id.in_(created_ids))
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars().all()
+            refreshed_by_id = {int(record.id): record for record in refreshed_records}
+            created_records = [refreshed_by_id[record_id] for record_id in created_ids]
 
     duplicate_count = sum(1 for record in created_records if record.is_duplicate)
     return {
@@ -736,6 +878,7 @@ async def create_records_from_jobs(
         "skipped_existing": len(skipped_existing_job_ids),
         "skipped_existing_job_ids": skipped_existing_job_ids,
         "duplicate_created": duplicate_count,
+        "records": created_records,
         "items": [
             {
                 "id": record.id,
@@ -795,6 +938,10 @@ async def update_record_value(
         custom_values = dict(record.custom_values or {})
         custom_values[key] = value
         record.custom_values = custom_values
+        if key == "apply_status":
+            resolved_status = _canonical_apply_status_value(value)
+            if resolved_status is not None:
+                record.apply_status = resolved_status
         record.updated_at_value = datetime.utcnow()
 
     if key in FIXED_FIELD_KEYS and key != "updated_at":
