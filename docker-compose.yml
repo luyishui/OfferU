@@ -43,8 +43,9 @@ services:
       - LLM_MODEL=${LLM_MODEL:-qwen-flash}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - CORS_ORIGINS=http://localhost:3011,http://127.0.0.1:3011,http://localhost:3000,http://127.0.0.1:3000
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
     ports:
+
       - "9000:8000"
     depends_on:
       db:
