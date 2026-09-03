@@ -26,6 +26,9 @@ from app.config import get_settings
 
 _logger = logging.getLogger(__name__)
 
+_BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+
 
 def _make_http_client() -> httpx.AsyncClient:
     """
@@ -108,9 +111,12 @@ def _get_client() -> tuple[AsyncOpenAI, str]:
             api_key="ollama",
             base_url=_ensure_ollama_v1(base_url),
             http_client=http_client,
+            default_headers={"User-Agent": _BROWSER_USER_AGENT},
         )
+        client.platform_headers = lambda: {}
         _logger.info("[LLM Config] source=ollama, base_url=%s, model=%s", base_url, model)
         return client, model
+
 
     # 判断是否存在激活配置
     has_active_selection = bool(active_config_id or active_base_url or active_api_key)
@@ -162,9 +168,12 @@ def _get_client() -> tuple[AsyncOpenAI, str]:
         api_key=api_key,
         base_url=base_url,
         http_client=http_client,
+        default_headers={"User-Agent": _BROWSER_USER_AGENT},
     )
+    client.platform_headers = lambda: {}
 
     return client, model
+
 
 
 async def chat_completion(

@@ -1,4 +1,4 @@
-﻿# =============================================
+# =============================================
 # OfferU - 鏁版嵁搴撴ā鍨嬪畾涔?
 # =============================================
 # 鏍稿績琛細jobs, resumes, resume_sections, resume_templates,
@@ -7,7 +7,7 @@
 # =============================================
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from sqlalchemy import (
     JSON,
@@ -22,7 +22,8 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
+
 
 from app.database import Base
 
@@ -1309,6 +1310,14 @@ class AgentAuditLog(Base):
     after_version_or_hash: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     error: Mapped[str] = mapped_column(Text, default="")
+
+    @validates("result_receipt_id")
+    def _validate_result_receipt_id(self, key: str, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = str(value).strip()
+        return stripped or None
+
 
 
 class AgentCheckpoint(Base):

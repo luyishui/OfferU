@@ -142,8 +142,9 @@ def agent_sse_response(run_turn: RunAgentSse) -> EventSourceResponse:
     async def producer() -> None:
         failed = False
         try:
-            response = await asyncio.wait_for(run_turn(sink), timeout=get_settings().agent_turn_timeout)
+            response = await run_turn(sink)
             await sink({"type": "final", **dict(response or {})})
+
         except Exception as exc:
             failed = True
             _logger.exception("Agent SSE producer failed")

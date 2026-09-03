@@ -71,6 +71,38 @@ export function affectedRecordsText(proposal: Record<string, unknown>): string {
     .join(" / ");
 }
 
+function formatErrorMessage(rawError: string | undefined): { summary: string; detail: string } {
+  const err = String(rawError || "").trim();
+  if (!err) {
+    return { summary: "模型响应异常，未返回有效内容", detail: "" };
+  }
+  if (err.includes("503") || err.includes("temporarily unavailable")) {
+    return {
+      summary: "上游模型服务暂时不可用 (503 Service Unavailable)，请检查模型网关状态或稍后重试",
+      detail: err,
+    };
+  }
+  if (err.includes("401") || err.includes("Incorrect API key") || err.includes("invalid_api_key")) {
+    return {
+      summary: "模型 API Key 无效或未配置，请在系统设置中检查配置",
+      detail: err,
+    };
+  }
+  if (err.includes("429") || err.includes("quota") || err.includes("rate limit")) {
+    return {
+      summary: "模型请求受限或额度不足 (429 Rate Limit / Quota Exceeded)",
+      detail: err,
+    };
+  }
+  if (err.includes("timeout") || err.includes("timed out")) {
+    return {
+      summary: "上游模型请求超时，请检查网络或稍后重试",
+      detail: err,
+    };
+  }
+  return { summary: "模型调用失败", detail: err };
+}
+
 export function AgentStreamMessageBubble({
   message,
   compact = false,
@@ -80,6 +112,43 @@ export function AgentStreamMessageBubble({
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
+  const rawObj = (message.raw && typeof message.raw === "object" ? message.raw : {}) as Record<string, unknown>;
+  const rawError = String(rawObj.error_message || rawObj.error || "").trim();
+  const isErrorStop = rawObj.stop_reason === "error" || Boolean(rawError);
+  const isBlank = !message.text?.trim();
+
+  if (isAssistant && (isErrorStop || isBlank)) {
+    const { summary, detail } = formatErrorMessage(rawError || (isErrorStop ? "模型未返回正文" : ""));
+    return (
+      <div className="flex justify-start">
+        <div className={`${compact ? "max-w-[92%]" : "max-w-[92%] md:max-w-[84%]"} text-left`}>
+          <div className="inline-block max-w-full border-2 border-[#D02020] bg-[#FFF5F5] px-3.5 py-2.5 text-sm shadow-[2px_2px_0_0_rgba(208,32,32,0.2)]">
+            <div className="flex items-start gap-2 font-semibold text-[#D02020]">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <div>
+                <div>{summary}</div>
+                {message.text && (
+                  <div className="mt-1 font-normal text-black/80">{message.text}</div>
+                )}
+              </div>
+            </div>
+            {detail && (
+              <details className="mt-2 border border-[#D02020]/20 bg-white px-2.5 py-1.5 text-xs text-black/70">
+                <summary className="flex cursor-pointer items-center gap-1 font-medium text-[#D02020]">
+                  <ChevronDown size={12} />
+                  技术错误详情
+                </summary>
+                <pre className="mt-1.5 max-h-40 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] text-black/65">
+                  {detail}
+                </pre>
+              </details>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`${compact ? "max-w-[92%]" : "max-w-[92%] md:max-w-[84%]"} ${isUser ? "text-right" : "text-left"}`}>
@@ -103,6 +172,7 @@ export function AgentStreamMessageBubble({
     </div>
   );
 }
+
 
 export function StreamingAssistantBubble({ streaming, compact = false }: { streaming: StreamingAssistant; compact?: boolean }) {
   return (

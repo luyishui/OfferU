@@ -92,8 +92,9 @@ async def log_agent_audit(
         result_status=result_status,
         result_summary=result_summary,
         changed_records=[_json_safe(item) for item in (changed_records if changed_records is not None else (_getattr(proposal, "affected_records") or []))],
-        result_receipt_id=str(result_receipt_id or ""),
+        result_receipt_id=str(result_receipt_id).strip() if result_receipt_id else None,
         result_digest=str(result_digest or ""),
+
         before_version_or_hash=before_version_or_hash or str(_getattr(proposal, "expected_version_or_hash") or ""),
         after_version_or_hash=after_version_or_hash,
         error=error,
