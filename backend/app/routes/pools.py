@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import Job, Pool
+from app.ops import execute_operation
 
 router = APIRouter()
 POOL_SCOPES = {"inbox", "picked", "ignored"}
@@ -97,39 +98,12 @@ async def list_pools(
 @router.post("/")
 async def create_pool(data: PoolCreateRequest, db: AsyncSession = Depends(get_db)):
     """创建岗位池（名称大小写不敏感）"""
-    name = data.name.strip()
-    scope = (data.scope or "picked").strip().lower()
-    if not name:
-        raise HTTPException(status_code=400, detail="Pool name is required")
-    if scope not in POOL_SCOPES:
-        raise HTTPException(status_code=400, detail="invalid pool scope")
-
-    existing = (
-        await db.execute(
-            select(Pool).where(
-                func.lower(Pool.name) == name.lower(),
-                Pool.scope == scope,
-            )
-        )
-    ).scalar_one_or_none()
-    if existing:
-        raise HTTPException(status_code=409, detail="Pool name already exists")
-
-    pool = Pool(
-        name=name,
-        scope=scope,
-        description=(data.description or "").strip(),
-        color=(data.color or "#3B82F6").strip(),
-        sort_order=data.sort_order,
+    result = await execute_operation(
+        "create_pool",
+        data.model_dump(),
+        surface="ui",
     )
-    db.add(pool)
-    try:
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Pool name already exists") from exc
-    await db.refresh(pool)
-    return _serialize_pool(pool, 0)
+    return _operation_output_or_error(result)
 
 
 @router.put("/{pool_id}")
@@ -140,56 +114,10 @@ async def update_pool(
     db: AsyncSession = Depends(get_db),
 ):
     """重命名岗位池"""
-    if scope and scope not in POOL_SCOPES:
-        raise HTTPException(status_code=400, detail="invalid pool scope")
-
-    name = data.name.strip() if isinstance(data.name, str) else None
-    if name is not None and not name:
-        raise HTTPException(status_code=400, detail="Pool name is required")
-
-    query = select(Pool).where(Pool.id == pool_id)
-    if scope:
-        query = query.where(Pool.scope == scope)
-    pool = (await db.execute(query)).scalar_one_or_none()
-    if not pool:
-        raise HTTPException(status_code=404, detail="Pool not found")
-
-    if name is not None:
-        conflict = (
-            await db.execute(
-                select(Pool).where(
-                    func.lower(Pool.name) == name.lower(),
-                    Pool.id != pool_id,
-                    Pool.scope == pool.scope,
-                )
-            )
-        ).scalar_one_or_none()
-        if conflict:
-            raise HTTPException(status_code=409, detail="Pool name already exists")
-        pool.name = name
-
-    if data.description is not None:
-        pool.description = data.description.strip()
-    if data.color is not None:
-        pool.color = data.color.strip()
-    if data.sort_order is not None:
-        pool.sort_order = int(data.sort_order)
-    try:
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Pool name already exists") from exc
-    await db.refresh(pool)
-
-    job_count = (
-        await db.execute(
-            select(func.count(Job.id)).where(
-                Job.pool_id == pool_id,
-                Job.triage_status == pool.scope,
-            )
-        )
-    ).scalar() or 0
-    return _serialize_pool(pool, job_count)
+    payload = data.model_dump(exclude_unset=True)
+    payload["pool_id"] = pool_id
+    result = await execute_operation("update_pool", payload, surface="ui")
+    return _operation_output_or_error(result)
 
 
 @router.delete("/{pool_id}")
@@ -199,22 +127,15 @@ async def delete_pool(
     db: AsyncSession = Depends(get_db),
 ):
     """删除岗位池，池内岗位转为未分组（pool_id=null）"""
-    if scope and scope not in POOL_SCOPES:
-        raise HTTPException(status_code=400, detail="invalid pool scope")
+    result = await execute_operation("delete_pool", {"pool_id": pool_id}, surface="ui")
+    return _operation_output_or_error(result)
 
-    query = select(Pool).where(Pool.id == pool_id)
-    if scope:
-        query = query.where(Pool.scope == scope)
 
-    pool = (await db.execute(query)).scalar_one_or_none()
-    if not pool:
-        raise HTTPException(status_code=404, detail="Pool not found")
-
-    jobs = (await db.execute(select(Job).where(Job.pool_id == pool_id))).scalars().all()
-    for job in jobs:
-        job.pool_id = None
-
-    await db.delete(pool)
-    await db.commit()
-
-    return {"deleted": True, "moved_to_ungrouped": len(jobs)}
+def _operation_output_or_error(result: dict) -> dict:
+    if result.get("ok"):
+        return result.get("outputs") or {}
+    detail = "; ".join(result.get("errors") or ["operation failed"])
+    status_code = 404 if "not found" in detail.lower() else 400
+    if "already exists" in detail.lower():
+        status_code = 409
+    raise HTTPException(status_code=status_code, detail=detail)
