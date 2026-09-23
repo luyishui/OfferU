@@ -339,7 +339,9 @@ async def _get_settings(db: AsyncSession) -> ApplicationWorkspaceSettings:
 async def _get_template(db: AsyncSession) -> ApplicationTemplate:
     template = (await db.execute(select(ApplicationTemplate).order_by(ApplicationTemplate.id.asc()))).scalars().first()
     if template:
-        template.schema_json = _normalize_schema(template.schema_json)
+        normalized = _normalize_schema(template.schema_json)
+        if normalized != template.schema_json:
+            template.schema_json = normalized
         return template
     template = ApplicationTemplate(schema_json=_default_template_schema())
     db.add(template)
@@ -366,7 +368,9 @@ async def _ensure_workspace_bootstrap(db: AsyncSession, *, commit: bool) -> None
     await _get_settings(db)
     template = await _get_template(db)
     total_table = await _get_total_table(db)
-    total_table.schema_json = _normalize_schema(total_table.schema_json or template.schema_json)
+    normalized_total = _normalize_schema(total_table.schema_json or template.schema_json)
+    if normalized_total != total_table.schema_json:
+        total_table.schema_json = normalized_total
 
     subtable_count = (
         await db.execute(
@@ -469,7 +473,9 @@ async def _get_table_or_raise(
     ).scalars().first()
     if not table:
         raise ValueError("目标表不存在")
-    table.schema_json = _normalize_schema(table.schema_json)
+    normalized_schema = _normalize_schema(table.schema_json)
+    if normalized_schema != table.schema_json:
+        table.schema_json = normalized_schema
     return table
 
 
