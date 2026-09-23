@@ -234,6 +234,18 @@ def resume_generation_scope(
 
 
 def resume_scope_from_session_state(session_state: Any) -> dict[str, Any]:
+    """Sealed generation scope for staging a ``generate_resume`` proposal.
+
+    The scope binds the *evidence* boundary (which profile/job/sections were
+    actually read). ``strategy_confirmed`` inside the scope asserts that
+    execution is fenced to a confirmed strategy — it is not a claim that the
+    user already confirmed. The proposal itself is the strategy-confirmation
+    surface: creation is allowed once evidence is durable, and the durable
+    ``readiness_gates.strategy_confirmed`` gate is recorded when the proposal
+    (or its plan group) is confirmed. A proposal that is rejected or expires
+    never executes, so the assertion can never be realized into a write
+    without the decision.
+    """
     if not isinstance(session_state, Mapping):
         return {}
     evidence = session_state.get("resume_readiness_evidence")
@@ -242,7 +254,7 @@ def resume_scope_from_session_state(session_state: Any) -> dict[str, Any]:
     return resume_generation_scope(
         evidence.get("profile_read_evidence"),
         evidence.get("job_read_evidence"),
-        strategy_confirmed=session_state.get("strategy_confirmed") is True,
+        strategy_confirmed=True,
     )
 
 

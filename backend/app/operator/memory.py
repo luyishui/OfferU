@@ -379,6 +379,7 @@ def write_memory_candidate(
     sensitive_confirmed: bool = False,
     actor_id: str = "",
     session_id: str = "",
+    commit: bool = True,
 ) -> Any:
     """Route one memory candidate through every memory guard.
 
@@ -418,6 +419,7 @@ def write_memory_candidate(
                 content=content,
                 confidence=confidence,
                 skill=skill,
+                commit=commit,
             )
 
         return guard_and_write()
@@ -533,6 +535,7 @@ async def _persist_memory_candidate(
     content: Mapping[str, Any],
     confidence: float,
     skill: str,
+    commit: bool = True,
 ) -> dict[str, Any]:
     try:
         safe_content = _json_safe(content)
@@ -548,8 +551,14 @@ async def _persist_memory_candidate(
             confidence=confidence,
         )
         session.add(row)
-        await session.commit()
-        await session.refresh(row)
+        if commit:
+            await session.commit()
+            await session.refresh(row)
+        else:
+            # Composable write inside a caller-owned transaction (e.g. a
+            # confirmation group): flush to assign identity / surface DB errors,
+            # but never commit — the outer executor commits atomically.
+            await session.flush()
         return _memory_decision(
             ok=True,
             stored=True,

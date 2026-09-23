@@ -25,7 +25,7 @@ from app.models.models import (
     Profile,
     ProfileSection,
 )
-from app.agents.interview_prep import extract_questions, generate_answer_hint
+from app.services.interview_prep import extract_questions, generate_answer_hint
 
 router = APIRouter()
 _logger = logging.getLogger(__name__)

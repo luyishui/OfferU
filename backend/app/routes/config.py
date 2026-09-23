@@ -796,7 +796,7 @@ async def boss_cookie_status():
 @router.post("/test-llm")
 async def test_llm_connection():
     import httpx
-    from app.agents.llm import _get_client
+    from app.services.llm import _get_client
 
     settings = get_settings()
     provider = settings.llm_provider

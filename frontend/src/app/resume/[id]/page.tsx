@@ -20,31 +20,25 @@ import {
   Card, CardBody, Input, Button, Divider, Checkbox,
   Dropdown, DropdownTrigger, DropdownMenu, DropdownItem,
   Modal, ModalContent, ModalHeader, ModalBody, ModalFooter,
-  Textarea, Select, SelectItem, Chip,
   useDisclosure,
 } from "@nextui-org/react";
 import {
   Save, FileDown, ArrowLeft, Plus, ChevronDown, ChevronUp,
   Eye, EyeOff, Trash2, Image as ImageIcon,
   GraduationCap, Briefcase, Wrench, FolderKanban, LayoutList,
-  Wand2, Check, X, AlertTriangle, Sparkles, ArrowDownToLine, AlertCircle,
+  Sparkles, ArrowDownToLine, AlertCircle,
   Undo2, Redo2, GripVertical, Palette,
 } from "lucide-react";
 import {
   useResume, updateResume, updateSection, createSection,
   deleteSection, uploadResumePhoto, uploadResumeLogo, resolveResumeLogo, useConfig,
-  aiOptimizeResume, aiApplySuggestion,
-  AiSuggestion, AiOptimizeResult,
   useResumeTemplates, applyTemplate,
   useProfile,
-  usePools,
   type ProfileSection,
-  type Job,
 } from "@/lib/hooks";
-import { jobsApi, resumeApi } from "@/lib/api";
+import { resumeApi } from "@/lib/api";
 import SectionEditor, { createEmptySectionItem } from "../components/SectionEditor";
 import ResumePreview from "../components/ResumePreview";
-import MatchScorePanel from "../components/MatchScorePanel";
 import StyleToolbar, { DEFAULT_STYLE_CONFIG, MIN_STYLE_CONFIG } from "../components/StyleToolbar";
 import RichTextEditor from "../components/RichTextEditor";
 import { useHistory } from "../hooks/useHistory";
@@ -253,32 +247,17 @@ export default function ResumeEditorPage() {
     });
   }, []);
 
-  // ---- AI 优化状态 ----
-  const { isOpen: isAiModalOpen, onOpen: onAiModalOpen, onClose: onAiModalClose } = useDisclosure();
   const {
     isOpen: isProfileImportOpen,
     onOpen: onProfileImportOpen,
     onClose: onProfileImportClose,
   } = useDisclosure();
-  const [jdText, setJdText] = useState("");
-  const [selectedJobId, setSelectedJobId] = useState<string>("");
-  const [aiResult, setAiResult] = useState<AiOptimizeResult | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
   const [profileImportError, setProfileImportError] = useState("");
-  const [appliedSuggestions, setAppliedSuggestions] = useState<Set<number>>(new Set());
   const [importingProfileSections, setImportingProfileSections] = useState(false);
   const [selectedProfileSectionIds, setSelectedProfileSectionIds] = useState<Set<number>>(new Set());
   const [profileImportTargetSectionId, setProfileImportTargetSectionId] = useState<number | null>(null);
   const [syncingProfileSources, setSyncingProfileSources] = useState(false);
   const [ignoredSourceTokens, setIgnoredSourceTokens] = useState<Set<string>>(new Set());
-  const [aiPoolFilter, setAiPoolFilter] = useState<string>("all");
-  const [aiJobKeyword, setAiJobKeyword] = useState("");
-  const [aiJobs, setAiJobs] = useState<Job[]>([]);
-  const [aiJobsLoading, setAiJobsLoading] = useState(false);
-  const keywordMatch = aiResult?.keyword_match;
-  const highlightedKeywords = keywordMatch?.matched || [];
-  const { data: pickedPools } = usePools("picked");
   const [deleteSectionTarget, setDeleteSectionTarget] = useState<{ id: number; title: string } | null>(null);
   const [deletingSection, setDeletingSection] = useState(false);
 
@@ -299,14 +278,6 @@ export default function ResumeEditorPage() {
     return new Map<number, ProfileSection>(profileSections.map((item) => [item.id, item]));
   }, [profileSections]);
 
-  const aiPoolOptions = useMemo(
-    () => [
-      { key: "all", label: "全部已筛选" },
-      { key: "ungrouped", label: "未分组" },
-      ...((pickedPools || []).map((pool) => ({ key: String(pool.id), label: pool.name }))),
-    ],
-    [pickedPools]
-  );
 
   const profileImportTargetSection = useMemo(() => {
     if (profileImportTargetSectionId == null) return null;
@@ -365,98 +336,6 @@ export default function ResumeEditorPage() {
 
     return stale;
   }, [sections, profileSectionMap, ignoredSourceTokens, profileSourceSyncEnabled]);
-  const isApiKeyConfigured = (() => {
-    if (!config) return true;
-    const apiConfigs = Array.isArray((config as any).llm_api_configs)
-      ? ((config as any).llm_api_configs as any[])
-      : [];
-    const activeByList = apiConfigs.find((item) => item?.is_active)
-      || apiConfigs.find((item) => item?.id === (config as any).active_llm_config_id);
-    if (activeByList) {
-      const providerId = String(activeByList.provider_id || "").toLowerCase();
-      if (providerId === "ollama") return true;
-      return !!activeByList.api_key;
-    }
-    const provider = config.llm_provider || "deepseek";
-    if (provider === "deepseek") return !!config.deepseek_api_key;
-    if (provider === "openai") return !!config.openai_api_key;
-    if (provider === "qwen") return !!(config as any).qwen_api_key;
-    if (provider === "siliconflow") return !!(config as any).siliconflow_api_key;
-    if (provider === "gemini") return !!(config as any).gemini_api_key;
-    if (provider === "zhipu") return !!(config as any).zhipu_api_key;
-    if (provider === "ollama") return true;
-    if ((config as any).active_llm_api_key) return true;
-    return true;
-  })();
-
-  useEffect(() => {
-    if (!isAiModalOpen) return;
-    let cancelled = false;
-
-    const keywordText = aiJobKeyword.trim();
-    const selectedPool =
-      aiPoolFilter === "all"
-        ? undefined
-        : aiPoolFilter === "ungrouped"
-          ? "ungrouped"
-          : Number(aiPoolFilter);
-
-    const loadAiJobs = async () => {
-      setAiJobsLoading(true);
-      try {
-        const pageSize = 100;
-        let page = 1;
-        let total = 0;
-        const all: Job[] = [];
-
-        while (true) {
-          const result: any = await jobsApi.list({
-            page,
-            page_size: pageSize,
-            triage_status: "picked",
-            pool_id: selectedPool,
-            keyword: keywordText || undefined,
-          });
-
-          const items = Array.isArray(result?.items) ? (result.items as Job[]) : [];
-          total = Number(result?.total || 0);
-          all.push(...items);
-
-          if (all.length >= total || items.length === 0) {
-            break;
-          }
-          page += 1;
-        }
-
-        if (!cancelled) {
-          const deduped = Array.from(new Map(all.map((job) => [job.id, job])).values());
-          setAiJobs(deduped);
-        }
-      } catch {
-        if (!cancelled) {
-          setAiJobs([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setAiJobsLoading(false);
-        }
-      }
-    };
-
-    void loadAiJobs();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [aiJobKeyword, aiPoolFilter, isAiModalOpen]);
-
-  useEffect(() => {
-    if (!selectedJobId) return;
-    const stillVisible = aiJobs.some((job) => String(job.id) === selectedJobId);
-    if (!stillVisible) {
-      setSelectedJobId("");
-    }
-  }, [aiJobs, selectedJobId]);
 
   /** 应用模板 — 覆盖当前样式配置 */
   const handleApplyTemplate = async (templateId: number) => {
@@ -1012,48 +891,6 @@ export default function ResumeEditorPage() {
     }
   };
 
-  // =============================================
-  // AI 优化：发送简历 + JD → 获取 ATS 评分和优化建议
-  // 流程：用户点击🪄按钮 → 弹出 JD 输入框 → 调用后端
-  //       → 展示 Diff 面板 → 逐条采纳/拒绝建议
-  // =============================================
-  const handleAiOptimize = async () => {
-    if (!jdText.trim() && !selectedJobId) return;
-    setAiLoading(true);
-    setAiError("");
-    setAiResult(null);
-    setAppliedSuggestions(new Set());
-    onAiModalClose();
-    try {
-      const result = await aiOptimizeResume(resumeId, {
-        jd_text: jdText.trim() || undefined,
-        job_id: selectedJobId ? Number(selectedJobId) : undefined,
-      });
-      setAiResult(result);
-    } catch (err: any) {
-      setAiError(err.message || "AI 优化请求失败");
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  /** 采纳单条 AI 建议：调用后端 apply 接口，更新本地 section 数据 */
-  const handleApplySuggestion = async (index: number, suggestion: AiSuggestion) => {
-    try {
-      await aiApplySuggestion(resumeId, suggestion);
-      setAppliedSuggestions((prev) => new Set(prev).add(index));
-      // 刷新简历数据以同步最新内容
-      mutate();
-    } catch (err: any) {
-      console.error("Apply suggestion failed:", err);
-    }
-  };
-
-  /** 关闭 AI 结果面板 */
-  const handleCloseAiPanel = () => {
-    setAiResult(null);
-    setAiError("");
-  };
 
   if (!resume) {
     return (
@@ -1150,16 +987,6 @@ export default function ResumeEditorPage() {
               title="重做 (Ctrl+Shift+Z)"
             >
               <Redo2 size={15} />
-            </Button>
-            <div className="mx-1 h-7 w-px bg-black/15" />
-            <Button
-              startContent={<Wand2 size={14} />}
-              size="sm"
-              isLoading={aiLoading}
-              onPress={onAiModalOpen}
-              className="bauhaus-button bauhaus-button-red !px-4 !py-3 !text-[11px]"
-            >
-              AI 优化
             </Button>
             <Button
               startContent={<ArrowDownToLine size={14} />}
@@ -1530,13 +1357,8 @@ export default function ResumeEditorPage() {
         </div>
 
         {/* ---- 右侧 A4 预览画布（居中展示，深色画布背景） ---- */}
-        <div className={`flex flex-1 items-start justify-center overflow-auto bg-[#EFEDE6] p-8 transition-all [background-image:radial-gradient(#121212_1.2px,transparent_1.2px)] [background-size:26px_26px] ${aiResult ? "mr-[380px]" : ""}`}>
+        <div className="flex flex-1 items-start justify-center overflow-auto bg-[#EFEDE6] p-8 transition-all [background-image:radial-gradient(#121212_1.2px,transparent_1.2px)] [background-size:26px_26px]">
           <div className="sticky top-0 flex flex-col gap-4">
-            <MatchScorePanel
-              score={keywordMatch?.score}
-              matched={keywordMatch?.matched}
-              missing={keywordMatch?.missing}
-            />
             <div className="bauhaus-panel bg-white p-4 md:p-5">
             <ResumePreview
               ref={previewRef}
@@ -1551,347 +1373,13 @@ export default function ResumeEditorPage() {
               contactJson={contactJson}
               sections={sections}
               styleConfig={styleConfig}
-              highlightKeywords={highlightedKeywords}
             />
             </div>
           </div>
         </div>
 
-        {/* ---- AI 优化结果面板（右侧抽屉，展示 ATS 评分 + 建议列表） ---- */}
-        <AnimatePresence>
-          {(aiResult || aiLoading || aiError) && (
-            <motion.div
-              initial={{ x: 380, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 380, opacity: 0 }}
-              transition={{ duration: 0.3, ease: "easeOut" }}
-              className="fixed bottom-0 right-0 top-0 z-30 flex w-[380px] flex-col border-l-2 border-black bg-[#E8E4DA] text-black shadow-[-4px_0_0_0_rgba(18,18,18,0.35)]"
-            >
-              {/* 面板头部 */}
-              <div className="flex h-16 flex-shrink-0 items-center justify-between border-b-2 border-black bg-[#F0C020] px-5">
-                <div className="flex items-center gap-2">
-                  <Sparkles size={16} className="text-[#121212]" aria-hidden="true" />
-                  <span className="text-sm font-black tracking-[0.06em] text-black">AI 优化建议</span>
-                </div>
-                <Button
-                  variant="light"
-                  isIconOnly
-                  size="sm"
-                  onPress={handleCloseAiPanel}
-                  aria-label="关闭 AI 建议面板"
-                  className="min-h-10 min-w-10 border-2 border-black bg-white text-black shadow-[2px_2px_0_0_rgba(18,18,18,0.3)] transition-transform hover:-translate-y-[1px]"
-                >
-                  <X size={16} />
-                </Button>
-              </div>
-
-              {/* 面板内容（可滚动） */}
-              <div className="flex-1 space-y-4 overflow-y-auto p-4">
-                {/* 加载中 */}
-                {aiLoading && (
-                  <div className="bauhaus-panel-sm flex flex-col items-center justify-center gap-3 bg-white px-5 py-12 text-center">
-                    <div className="h-9 w-9 animate-spin rounded-full border-[3px] border-black border-t-[#1040C0]" />
-                    <span className="text-sm font-semibold tracking-[0.04em] text-black/75">AI 正在分析简历...</span>
-                    <span className="text-xs font-medium text-black/55">通常需要 10-30 秒</span>
-                  </div>
-                )}
-
-                {/* 错误提示 */}
-                {aiError && (
-                  <div className="bauhaus-panel-sm flex items-start gap-3 bg-[#D02020] p-4 text-white">
-                    <AlertTriangle size={16} className="mt-0.5 shrink-0 text-white" />
-                    <div>
-                      <p className="text-sm font-black tracking-[0.04em]">优化失败</p>
-                      <p className="mt-1 text-xs font-medium text-white/80">{aiError}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* AI 结果展示 */}
-                {aiResult && (
-                  <>
-                    {/* ATS 关键词匹配度 */}
-                    {aiResult.keyword_match && (
-                      <div className="bauhaus-panel-sm space-y-3 bg-white p-4">
-                        <h4 className="bauhaus-label text-black/55">关键词匹配度</h4>
-                        <div className="flex items-end gap-3">
-                          <div className="text-4xl font-black uppercase tracking-[-0.08em] text-black">{aiResult.keyword_match.score}</div>
-                          <span className="mb-1 text-sm font-bold text-black/45">/ 100</span>
-                        </div>
-                        <div className="border-2 border-black bg-[#F0F0F0] p-1 shadow-[2px_2px_0_0_rgba(18,18,18,0.3)]">
-                          <div
-                            className={`h-4 ${
-                              aiResult.keyword_match.score >= 70
-                                ? "bg-[#1040C0]"
-                                : aiResult.keyword_match.score >= 40
-                                  ? "bg-[#F0C020]"
-                                  : "bg-[#D02020]"
-                            }`}
-                            style={{ width: `${Math.max(0, Math.min(aiResult.keyword_match.score, 100))}%` }}
-                          />
-                        </div>
-                        {/* 已匹配关键词 */}
-                        {aiResult.keyword_match.matched.length > 0 && (
-                          <div className="space-y-1">
-                            <span className="bauhaus-label text-black/45">已匹配</span>
-                            <div className="flex flex-wrap gap-1">
-                              {aiResult.keyword_match.matched.map((kw, i) => (
-                                <Chip key={i} size="sm" variant="flat" className="border-2 border-black bg-[#1040C0] px-2 text-[10px] font-semibold text-white">
-                                  {kw}
-                                </Chip>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* 缺失关键词 */}
-                    {aiResult.keyword_match?.missing && aiResult.keyword_match.missing.length > 0 && (
-                      <div className="bauhaus-panel-sm space-y-2 bg-white p-4">
-                        <h4 className="bauhaus-label text-black/55">缺失关键词</h4>
-                        <div className="flex flex-wrap gap-1.5">
-                          {aiResult.keyword_match.missing.map((kw, i) => (
-                            <Chip key={i} size="sm" variant="flat" className="border-2 border-black bg-[#F0C020] px-2 text-xs font-semibold text-black">
-                              {kw}
-                            </Chip>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* 总结 */}
-                    {aiResult.summary && (
-                      <div className="bauhaus-panel-sm bg-white p-4">
-                        <h4 className="bauhaus-label mb-2 text-black/55">优化总结</h4>
-                        <p className="text-sm font-medium leading-relaxed text-black/72">{aiResult.summary}</p>
-                      </div>
-                    )}
-
-                    {/* 建议列表 — 逐条展示 Diff，支持采纳/拒绝 */}
-                    <div className="space-y-2">
-                      <h4 className="bauhaus-label px-1 text-black/55">
-                        优化建议 ({aiResult.suggestions.length})
-                      </h4>
-                      {aiResult.suggestions.map((sug, idx) => {
-                        const isApplied = appliedSuggestions.has(idx);
-                        return (
-                          <div
-                            key={idx}
-                            className={`space-y-2 border-2 border-black p-3 shadow-[2px_2px_0_0_rgba(18,18,18,0.3)] transition-transform hover:-translate-y-[1px] ${
-                              isApplied
-                                ? "bg-[#F0C020]"
-                                : "bg-white"
-                            }`}
-                          >
-                            {/* 建议类型标签 */}
-                            <div className="flex items-center justify-between">
-                              <Chip
-                                size="sm"
-                                variant="flat"
-                                className={
-                                  sug.type === "bullet_rewrite"
-                                    ? "border-2 border-black bg-[#1040C0] font-semibold text-white"
-                                    : sug.type === "keyword_add"
-                                      ? "border-2 border-black bg-[#D02020] font-semibold text-white"
-                                      : "border-2 border-black bg-[#F0C020] font-semibold text-black"
-                                }
-                              >
-                                {sug.type === "bullet_rewrite"
-                                  ? "经历改写"
-                                  : sug.type === "keyword_add"
-                                  ? "关键词补充"
-                                  : "模块排序"}
-                              </Chip>
-                              {isApplied && (
-                                <Chip size="sm" variant="flat" startContent={<Check size={10} />} className="border-2 border-black bg-white font-semibold text-black">
-                                  已采纳
-                                </Chip>
-                              )}
-                            </div>
-
-                            {/* 条目标识 */}
-                            {sug.item_label && (
-                              <p className="text-[11px] font-semibold tracking-[0.04em] text-black/55">{sug.section_title} · {sug.item_label}</p>
-                            )}
-
-                            {/* 原文 → 建议 Diff 展示 */}
-                            {sug.original && (
-                              <div className="border-2 border-black bg-[#F6D7D7] p-2">
-                                <span className="text-[10px] font-semibold tracking-[0.04em] text-black/55">原文</span>
-                                <p className="mt-0.5 text-xs font-medium text-black/65 line-clamp-4">
-                                  {typeof sug.original === "string" ? sug.original : JSON.stringify(sug.original)}
-                                </p>
-                              </div>
-                            )}
-                            {sug.suggested && (
-                              <div className="border-2 border-black bg-[#DCE7FF] p-2">
-                                <span className="text-[10px] font-semibold tracking-[0.04em] text-black/55">建议</span>
-                                <p className="mt-0.5 text-xs font-medium text-black/78 line-clamp-4">
-                                  {typeof sug.suggested === "string" ? sug.suggested : JSON.stringify(sug.suggested)}
-                                </p>
-                              </div>
-                            )}
-
-                            {/* 原因说明 */}
-                            {sug.reason && (
-                              <p className="text-[11px] font-medium italic text-black/55">{sug.reason}</p>
-                            )}
-
-                            {/* 操作按钮 */}
-                            {!isApplied && (
-                              <div className="flex justify-end gap-2 pt-1">
-                                <Button
-                                  size="sm"
-                                  startContent={<Check size={12} />}
-                                  onPress={() => handleApplySuggestion(idx, sug)}
-                                  className="bauhaus-button bauhaus-button-yellow !min-h-8 !px-3 !py-2 !text-[11px]"
-                                >
-                                  采纳
-                                </Button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
-      {/* ========== JD 输入弹窗 — 粘贴岗位描述或选择已有职位 ========== */}
-      <Modal
-        isOpen={isAiModalOpen}
-        onClose={onAiModalClose}
-        size="lg"
-      >
-        <ModalContent className={bauhausModalContentClassName}>
-          <ModalHeader className="flex items-center gap-2 border-b-2 border-black bg-[#F0C020] px-6 py-5 text-xl font-black tracking-[-0.06em]">
-            <Wand2 size={18} className="text-black" />
-            <span>AI 简历优化</span>
-          </ModalHeader>
-          <ModalBody className="space-y-4 px-6 py-6">
-            <p className="text-sm font-medium leading-relaxed text-black/70">
-              粘贴目标岗位的 JD（职位描述），AI 将分析 ATS 匹配度并生成优化建议。
-            </p>
-
-            {!isApiKeyConfigured && (
-              <div className="bauhaus-panel-sm flex items-start gap-3 bg-[#F0C020] p-4">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-black" />
-                <p className="text-xs font-medium leading-relaxed text-black/78">
-                  未配置 AI 服务。请先前往 <a href="/settings" className="underline">设置页面</a> 配置 LLM API Key。
-                </p>
-              </div>
-            )}
-
-            {/* 从已筛选岗位选择 */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Select
-                label="目标池选择"
-                variant="bordered"
-                size="sm"
-                selectedKeys={[aiPoolFilter]}
-                onSelectionChange={(keys) => {
-                  const val = Array.from(keys)[0] as string;
-                  setAiPoolFilter(val || "all");
-                }}
-                items={aiPoolOptions}
-                classNames={bauhausSelectClassNames}
-              >
-                {(item) => <SelectItem key={item.key}>{item.label}</SelectItem>}
-              </Select>
-
-              <Input
-                label="岗位检索"
-                variant="bordered"
-                size="sm"
-                placeholder="输入岗位名或公司名"
-                value={aiJobKeyword}
-                onValueChange={setAiJobKeyword}
-                classNames={bauhausFieldClassNames}
-              />
-            </div>
-
-            <Select
-              label="从已筛选岗位选择（可选）"
-              variant="bordered"
-              size="sm"
-              selectedKeys={selectedJobId ? [selectedJobId] : []}
-              onSelectionChange={(keys: any) => {
-                const val = Array.from(keys)[0] as string;
-                setSelectedJobId(val || "");
-                if (val) setJdText("");
-              }}
-              isLoading={aiJobsLoading}
-              disabledKeys={aiJobsLoading ? [] : undefined}
-              classNames={bauhausSelectClassNames}
-            >
-              {aiJobs.map((job) => (
-                <SelectItem key={String(job.id)} textValue={`${job.title} ${job.company}`}>
-                  <div className="flex flex-col">
-                    <span className="text-xs font-medium text-black">{job.title}</span>
-                    <span className="text-[10px] text-black/45">{job.company}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </Select>
-
-            {!aiJobsLoading && aiJobs.length === 0 && (
-              <div className="bauhaus-panel-sm bg-white px-3 py-3 text-xs font-medium text-black/60">
-                当前筛选条件下暂无可选岗位，可直接切换为手动输入 JD。
-              </div>
-            )}
-
-            {/* 手动粘贴 JD */}
-            {!selectedJobId && (
-              <Textarea
-                label="职位描述 (JD)"
-                variant="bordered"
-                placeholder="粘贴完整的职位描述文本..."
-                minRows={6}
-                maxRows={12}
-                value={jdText}
-                onValueChange={setJdText}
-                classNames={bauhausFieldClassNames}
-              />
-            )}
-
-            {selectedJobId && (
-              <div className="bauhaus-panel-sm flex items-center gap-2 bg-white px-4 py-3">
-                <Briefcase size={14} className="text-[#1040C0]" />
-                <span className="text-xs font-medium text-black/65">将使用所选职位的描述进行分析</span>
-                <Button
-                  size="sm"
-                  variant="light"
-                  className="bauhaus-button bauhaus-button-outline !ml-auto !min-h-8 !px-3 !py-2 !text-[11px]"
-                  onPress={() => setSelectedJobId("")}
-                >
-                  改为手动输入
-                </Button>
-              </div>
-            )}
-          </ModalBody>
-          <ModalFooter className="border-t-2 border-black px-6 py-5">
-            <Button variant="light" size="sm" onPress={onAiModalClose} className="bauhaus-button bauhaus-button-outline !px-4 !py-3 !text-[11px]">
-              取消
-            </Button>
-            <Button
-              size="sm"
-              startContent={<Sparkles size={14} />}
-              isLoading={aiLoading}
-              isDisabled={(!jdText.trim() && !selectedJobId) || !isApiKeyConfigured}
-              onPress={handleAiOptimize}
-              className="bauhaus-button bauhaus-button-red !px-4 !py-3 !text-[11px]"
-            >
-              开始优化
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
 
       <Modal
         isOpen={isProfileImportOpen}

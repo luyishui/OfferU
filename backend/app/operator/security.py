@@ -170,8 +170,13 @@ def verify_resume_generate_readiness(args: Mapping[str, Any] | None, session_sta
     job_evidence = evidence.get("job_read_evidence")
     if not job_read_evidence_ready(job_evidence):
         missing.append("job_read_evidence")
-    if not bool(state.get("strategy_confirmed")):
-        missing.append("strategy_confirmed")
+    # ``strategy_confirmed`` is intentionally NOT a blocking gate here: the
+    # staged ``generate_resume`` proposal is itself the strategy-confirmation
+    # surface (the preview IS the strategy the user approves), so the durable
+    # decision is recorded when that proposal is confirmed. Evidence gates and
+    # evidence-target bindings still block — they can only be satisfied by
+    # real reads through Operator tool traces.
+    strategy_confirmed = bool(state.get("strategy_confirmed"))
     for field_name in evidence_target_mismatches(safe_args, state):
         missing.append(f"{field_name}_read_evidence_binding")
 
@@ -180,7 +185,7 @@ def verify_resume_generate_readiness(args: Mapping[str, Any] | None, session_sta
     missing_requirements = resolve_readiness_missing_requirements(
         profile_evidence=profile_evidence,
         job_evidence=job_evidence,
-        strategy_confirmed=bool(state.get("strategy_confirmed")),
+        strategy_confirmed=strategy_confirmed,
     )
     for binding_name in missing:
         if binding_name.endswith("_read_evidence_binding") and binding_name not in {

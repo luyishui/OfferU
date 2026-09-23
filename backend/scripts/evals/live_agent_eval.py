@@ -280,7 +280,6 @@ class RuntimePatch:
         from app import database
         from app.agent import orchestrator
         from app.operator import proposals
-        from app.routes import agent as agent_route
         from app.routes import harness_agent, optimize
         from app.services import harness_history
 
@@ -299,7 +298,6 @@ class RuntimePatch:
             "harness_async_session": harness_agent.async_session,
             "optimize_async_session": optimize.async_session,
             "proposals_async_session": proposals.async_session,
-            "agent_async_session": getattr(agent_route, "async_session", None),
             "history_dir": harness_history.HISTORY_DIR,
             "history_path": harness_history.HISTORY_PATH,
             "provider_factory": orchestrator._provider_factory,
@@ -311,8 +309,6 @@ class RuntimePatch:
         harness_agent.async_session = self.session_factory
         optimize.async_session = self.session_factory
         proposals.async_session = self.session_factory
-        if hasattr(agent_route, "async_session"):
-            agent_route.async_session = self.session_factory
         harness_history.HISTORY_DIR = self.history_path.parent
         harness_history.HISTORY_PATH = self.history_path
         orchestrator._SESSION_LOCKS.clear()
@@ -323,7 +319,6 @@ class RuntimePatch:
         from app import database
         from app.agent import orchestrator
         from app.operator import proposals
-        from app.routes import agent as agent_route
         from app.routes import harness_agent, optimize
         from app.services import harness_history
 
@@ -334,8 +329,6 @@ class RuntimePatch:
         harness_agent.async_session = self._saved["harness_async_session"]
         optimize.async_session = self._saved["optimize_async_session"]
         proposals.async_session = self._saved["proposals_async_session"]
-        if hasattr(agent_route, "async_session"):
-            agent_route.async_session = self._saved["agent_async_session"]
         harness_history.HISTORY_DIR = self._saved["history_dir"]
         harness_history.HISTORY_PATH = self._saved["history_path"]
         orchestrator._provider_factory = self._saved["provider_factory"]

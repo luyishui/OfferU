@@ -191,8 +191,24 @@ async def execute_tool(
                 db, actor, turn_key=turn_key, canonical_effect_key=effect_key,
                 tool_name=canonical_name, args=normalized_args,
                 base_version=str(normalized_args.get("expected_version_or_hash") or ""),
+                deduplicate=True,
             )
-            session_state[PLAN_DRAFT_STATE_KEY] = staged_intent.draft_id
+            # A returned intent whose canonical_effect_key differs from the one
+            # just computed was reused by idempotent dedup: the identical
+            # action+input is already staged in an open draft or already sealed
+            # into a Plan awaiting confirmation.
+            deduplicated = str(staged_intent.canonical_effect_key or "") != effect_key
+            dedup_draft_status = ""
+            if deduplicated:
+                dedup_draft = await db.get(models.AgentPlanDraft, str(staged_intent.draft_id))
+                dedup_draft_status = str(getattr(dedup_draft, "status", "") or "")
+            if deduplicated and dedup_draft_status == "sealed" and session_state.get(PLAN_DRAFT_STATE_KEY):
+                # The duplicate resolves to an already-sealed Plan; the draft
+                # pointer must stay on this turn's open draft so its genuinely
+                # new intents still compile at turn end.
+                pass
+            else:
+                session_state[PLAN_DRAFT_STATE_KEY] = staged_intent.draft_id
         call_kwargs = {
             "session": db,
             "db": db,
@@ -212,11 +228,24 @@ async def execute_tool(
             call_kwargs["_defer_commit"] = True
         if staged_intent is not None:
             output_references = staged_intent_output_references(staged_intent)
+            already_sealed = dedup_draft_status == "sealed"
+            dedup_guidance = ""
+            if deduplicated:
+                # Reporting the reuse keeps the model from re-issuing the same
+                # call expecting a second effect.
+                dedup_guidance = (
+                    "deduplicated: this identical action+input is already sealed into a "
+                    "pending Plan awaiting user confirmation; do not re-issue it."
+                    if already_sealed
+                    else "deduplicated: this identical action+input is already staged in "
+                    "the open PlanDraft; it will not execute twice."
+                )
             raw_result = {
                 "ok": True,
                 "status": "intent_staged",
                 "draft_id": staged_intent.draft_id,
                 "intent_id": staged_intent.intent_id,
+                "deduplicated": deduplicated,
                 "output_references": output_references,
                 "reference_guidance": (
                     "For a later staged operation in this same PlanDraft, copy the exact "
@@ -226,8 +255,10 @@ async def execute_tool(
                     else "This staged intent declares no referenceable typed output."
                 ),
                 "write_occurred": False,
-                "completion_reason": "awaiting_plan_compilation",
+                "completion_reason": "awaiting_confirmation" if deduplicated else "awaiting_plan_compilation",
             }
+            if dedup_guidance:
+                raw_result["dedup_guidance"] = dedup_guidance
         else:
             raw_result = await _call_executor(executor, call_kwargs)
         if canonical_name == "manage_session":

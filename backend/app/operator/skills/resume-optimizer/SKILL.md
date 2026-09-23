@@ -8,7 +8,7 @@ Prepare or optimize a resume using verified profile facts and the selected job d
 2. Read the target Job, Profile, and relevant ProfileSection records with Operator tools.
 3. Record user exclusions and unsupported-claim boundaries in the current session.
 4. Explain the tailoring strategy and obtain the strategy confirmation required by the runtime.
-5. Use `generate_resume` or `optimize_resume` only after readiness evidence is durable and complete.
+5. Use `generate_resume` only after readiness evidence is durable and complete.
 6. Treat generated content as a proposal; never claim a write before the confirmation and result receipt succeed.
 
 ## Safety boundaries

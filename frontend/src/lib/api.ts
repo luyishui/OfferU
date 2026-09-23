@@ -651,6 +651,14 @@ export function agentChatStream(
   return streamAgentEndpoint("/api/harness-agent/chat/stream", data as unknown as Record<string, unknown>, handlers, signal);
 }
 
+export function profileAgentChatStream(
+  data: { session_id: string; message: string },
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal
+) {
+  return streamAgentEndpoint("/api/profile/agent/message/stream", data as Record<string, unknown>, handlers, signal);
+}
+
 export function optimizeAgentChatStream(
   data: { session_id: string; message: string; action?: string; feedback?: string },
   handlers: AgentStreamHandlers = {},
@@ -735,37 +743,24 @@ export const getConversationTree = harnessAgentApi.getConversationTree;
 export const navigateConversationTree = harnessAgentApi.navigateConversationTree;
 
 // ---- Profile API ----
-export interface ProfileAgentPatch {
-  action: "ask_user" | "propose_patch" | "apply_patch" | "generate_resume" | "finish";
-  assistant_message: string;
-  base_info: Record<string, string>;
-  target_roles: string[];
-  sections: {
-    section_type: string;
-    category_label?: string;
-    title: string;
-    content_json: Record<string, any>;
-    confidence: number;
-  }[];
-  next_question?: string;
-  confidence?: number;
-}
-
-export interface ProfileAgentResponse {
-  session_id: number;
-  state: Record<string, any>;
-  assistant_message: string;
-  patch: ProfileAgentPatch;
-  agent_trace?: Record<string, any>[];
-  stop_reason?: string;
+export interface ProfileAgentSessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_message: string;
 }
 
 export interface ProfileAgentSessionDetail {
-  id: number;
+  id: string;
   status: string;
-  state: Record<string, any>;
-  pending_patch?: ProfileAgentPatch | null;
-  messages_json: Record<string, any>[];
+  title?: string;
+  messages_json: { role: string; content: string }[];
+}
+
+export interface ProfileAgentTurnResponse extends HarnessAgentResponse {
+  session_id?: string;
 }
 
 export const profileApi = {
@@ -845,7 +840,7 @@ export const profileApi = {
     target_role?: string;
     target_city?: string;
     job_goal?: string;
-  }): Promise<ProfileAgentResponse> => {
+  }): Promise<ProfileAgentTurnResponse> => {
     const formData = new FormData();
     if (data.file) formData.append("file", data.file);
     formData.append("resume_text", data.resume_text || "");
@@ -861,18 +856,9 @@ export const profileApi = {
     return res.json();
   },
 
-  sendProfileAgentMessage: (data: { session_id: number; message: string }) =>
-    request<ProfileAgentResponse>("/api/profile/agent/message", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+  listProfileAgentSessions: (limit = 20) =>
+    request<{ sessions: ProfileAgentSessionSummary[] }>(`/api/profile/agent/sessions?limit=${limit}`),
 
-  getProfileAgentSession: (sessionId: number) =>
-    request<ProfileAgentSessionDetail>(`/api/profile/agent/sessions/${sessionId}`),
-
-  applyProfileAgentPatch: (data: { session_id: number; patch?: ProfileAgentPatch }) =>
-    request("/api/profile/agent/apply-patch", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
+  getProfileAgentSession: (sessionId: string) =>
+    request<ProfileAgentSessionDetail>(`/api/profile/agent/sessions/${encodeURIComponent(sessionId)}`),
 };

@@ -131,6 +131,25 @@ async def update_session_state(
 
         await validate_session_context_scope(session, actor, cleaned)
         _apply_operation(agent_session, operation, cleaned)
+        if operation == "deactivate_skill":
+            # Durable skill_runtime lives in agent_session.state_json, separate
+            # from the active_skill/current_step columns cleared above. Without
+            # this, load_harness_skill_state keeps returning the stale active
+            # skill + readiness_gates and generate_resume can pass readiness
+            # after the skill was deactivated.
+            from app.harness import skill_runtime
+
+            await skill_runtime.set_active_skill_state(
+                session,
+                actor,
+                skill_name="",
+                skill_step="",
+                status="inactive",
+                readiness_gates={},
+                metadata={"surface": "operator_session", "operation": "deactivate_skill"},
+                source="operator_session_adapter",
+                sync_agent_session=False,
+            )
         if checkpoint_id:
             agent_session.checkpoint_id = checkpoint_id
         await _expire_incompatible_pending_proposals(session, actor, agent_session)

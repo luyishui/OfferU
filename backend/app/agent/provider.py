@@ -21,7 +21,7 @@ from app.agent.types import (
     ToolCallContent,
     Usage,
 )
-from app.agents.llm import _get_client
+from app.services.llm import _get_client
 from app.config import get_settings
 
 _logger = logging.getLogger(__name__)

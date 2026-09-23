@@ -758,7 +758,13 @@ async def invoke_action(
                 locked_payload["original_filter"] = original_filter
         if spec.confirmation_required or risk >= 3 or _force_proposal:
             if action == "generate_resume":
-                readiness = await skill_runtime.verify_resume_generate_readiness(session, actor)
+                # The proposal preview is the strategy-confirmation surface:
+                # evidence gates must be durable before the card exists, while
+                # strategy_confirmed is recorded by this proposal's own
+                # confirm (see skill_runtime.record_resume_strategy_confirmation).
+                readiness = await skill_runtime.verify_resume_generate_readiness(
+                    session, actor, require_strategy_confirmed=False
+                )
                 if not readiness.get("ok"):
                     raise OperatorError(
                         "validation_error",
@@ -793,11 +799,10 @@ async def invoke_action(
             "smartfill_option_match",
             "smartfill_field_map",
             "smartfill_module_count",
-            # WP5: durable memory write is low-risk and executes directly after
-            # every write_memory_candidate guard; it never bypasses the
-            # category whitelist, business-fact rejection, sensitive-content
-            # confirmation, scope, or redaction.
-            "remember_preference",
+            # remember_preference carries side_effects=("create:agent_memory",)
+            # so _should_stage_plan_intent always stages it into a proposal —
+            # it is intentionally NOT in this direct-invoke set (the durable
+            # write must go through the shared confirmation transaction).
         }
         if action in direct_invoke_actions:
             from app.operator.proposals import _prepare_invoke_action
@@ -835,41 +840,6 @@ async def invoke_action(
                 "confirmation_required": False,
                 "result": result,
             }, action=action)
-        if action == "optimize_agent_chat":
-            compatibility_status = "legacy_compatibility_continues"
-            result_summary = (
-                "Optimize agent chat crossed the operator compatibility boundary; "
-                "legacy chat may continue, but no official operator work was completed."
-            )
-            await _audit_completed_action_boundary(
-                session,
-                actor,
-                action=action,
-                input_payload=cleaned,
-                risk_level=risk,
-                user_message=user_message,
-                confirmation_status="legacy_compatibility",
-                result_status=compatibility_status,
-                result_summary=result_summary,
-            )
-            if not _defer_commit:
-                await session.commit()
-            return {
-                "ok": True,
-                "status": compatibility_status,
-                "tool_name": "invoke_action",
-                "action": action,
-                "risk_level": risk,
-                "confirmation_required": False,
-                "official_work_completed": False,
-                "legacy_compatibility_allowed": True,
-                "result": {
-                    "status": compatibility_status,
-                    "summary": result_summary,
-                    "official_work_completed": False,
-                    "legacy_compatibility_allowed": True,
-                },
-            }
         return _not_implemented_response(spec)
     except OperatorError as exc:
         await _rollback_quietly(session)

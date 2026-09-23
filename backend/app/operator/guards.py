@@ -1588,37 +1588,6 @@ def _normalize_activate_skill_aliases(operation: str, updates: Mapping[str, Any]
     return normalized
 
 
-async def apply_session_operation(session: AsyncSession, actor: ActorContext, operation: str, updates: Mapping[str, Any]) -> Any:
-    agent_session = await get_or_create_agent_session(session, actor)
-    cleaned = validate_session_updates(operation, updates)
-    await validate_session_context_scope(session, actor, cleaned)
-    if operation == "deactivate_skill":
-        agent_session.active_skill = ""
-        agent_session.current_step = ""
-    elif operation == "clear_context":
-        agent_session.current_job_id = None
-        agent_session.current_resume_id = None
-        agent_session.current_profile_section_id = None
-        agent_session.current_application_id = None
-    elif operation == "restore_checkpoint":
-        checkpoint = await session.get(models.AgentCheckpoint, cleaned["checkpoint_id"])
-        if checkpoint is None:
-            raise OperatorError("not_found_error", "Checkpoint was not found.", {"checkpoint_id": cleaned["checkpoint_id"]})
-        if checkpoint.actor_id != actor.actor_id or checkpoint.session_id != actor.session_id:
-            raise OperatorError("permission_error", "Checkpoint is outside the current actor/session scope.", {})
-        for field in SESSION_UPDATE_FIELDS:
-            if hasattr(checkpoint, field):
-                setattr(agent_session, field, getattr(checkpoint, field))
-    for field, value in cleaned.items():
-        if field in SESSION_UPDATE_FIELDS and field != "pending_proposal_ids":
-            setattr(agent_session, field, value or "")
-        elif field == "pending_proposal_ids":
-            agent_session.pending_proposal_ids = list(value or [])
-    agent_session.actor_id = actor.actor_id
-    agent_session.adapter = actor.adapter
-    await session.commit()
-    await session.refresh(agent_session)
-    return agent_session
 
 
 async def validate_session_context_scope(session: AsyncSession, actor: ActorContext, updates: Mapping[str, Any]) -> None:

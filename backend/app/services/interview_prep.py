@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Optional
 
-from app.agents.llm import chat_completion, extract_json
+from app.services.llm import chat_completion, extract_json
 
 _logger = logging.getLogger(__name__)
 

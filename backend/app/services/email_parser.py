@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from app.agents.llm import chat_completion
+from app.services.llm import chat_completion
 
 # ---- 中国校招邮件分类体系 (8 种) ----
 # 参考 apply-potato 分类 + 中国化扩展

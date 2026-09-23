@@ -65,6 +65,89 @@ async def recover_collecting_plan_draft_id(db: Any, actor: Any, *, turn_key: str
     )
     return str(draft_id or "")
 
+_REUSABLE_INTENT_TOOL_NAMES = frozenset({"invoke_action"})
+
+
+async def _load_reusable_intent(
+    db: Any,
+    actor: Any,
+    *,
+    tool_name: str,
+    args_digest: str,
+) -> models.AgentPlanIntent | None:
+    """Return the canonical still-open staged intent for an identical payload.
+
+    ``args_digest`` is the honest dedup key: it already binds
+    ``{tool_name, normalized args, base_version, atomic_group_id}``, so for
+    ``invoke_action`` it is exactly ``(action, normalized input)`` plus the
+    optimistic-concurrency fence. Two calls are duplicates only when every
+    execution-relevant field is identical; any genuinely different step (other
+    action, other input, other base_version, other atomic group) digests
+    differently and is never merged.
+
+    A staged intent is reusable only while its effect cannot have run yet:
+
+    * ``collecting`` draft — the intent is still open and can absorb the call;
+    * ``sealed`` draft whose Plan is still ``sealed`` and unexecuted — the
+      sealed node already awaits confirmation, so a repeat call merges into
+      that pending authority instead of sealing a parallel duplicate Plan.
+
+    Terminal drafts (rejected/expired) and Plans that are executing, decided,
+    expired, or replaced are NOT reusable: a repeat call there is new work and
+    must stage normally.
+    """
+    if tool_name not in _REUSABLE_INTENT_TOOL_NAMES:
+        return None
+    rows = list(
+        (
+            await db.execute(
+                select(models.AgentPlanIntent, models.AgentPlanDraft.status)
+                .join(
+                    models.AgentPlanDraft,
+                    models.AgentPlanIntent.draft_id == models.AgentPlanDraft.draft_id,
+                )
+                .where(
+                    models.AgentPlanDraft.actor_id == str(actor.actor_id),
+                    models.AgentPlanDraft.session_id == str(actor.session_id),
+                    models.AgentPlanIntent.tool_name == str(tool_name),
+                    models.AgentPlanIntent.args_digest == str(args_digest),
+                )
+                .order_by(models.AgentPlanIntent.created_at, models.AgentPlanIntent.sequence)
+            )
+        ).all()
+    )
+    if not rows:
+        return None
+    sealed_draft_ids = [
+        str(intent.draft_id)
+        for intent, draft_status in rows
+        if str(draft_status or "") == "sealed"
+    ]
+    unconfirmed_plan_draft_ids: set[str] = set()
+    if sealed_draft_ids:
+        unconfirmed_plan_draft_ids = {
+            str(draft_id)
+            for draft_id in (
+                await db.execute(
+                    select(models.ProposalPlan.draft_id).where(
+                        models.ProposalPlan.draft_id.in_(sealed_draft_ids),
+                        models.ProposalPlan.status == "sealed",
+                        models.ProposalPlan.execution_started.is_(False),
+                    )
+                )
+            ).scalars().all()
+        }
+    sealed_fallback: models.AgentPlanIntent | None = None
+    for intent, draft_status in rows:
+        status = str(draft_status or "")
+        if status == "collecting":
+            # Prefer an open draft: it can absorb the call without sealing a
+            # new Plan at all.
+            return intent
+        if sealed_fallback is None and status == "sealed" and str(intent.draft_id) in unconfirmed_plan_draft_ids:
+            sealed_fallback = intent
+    return sealed_fallback
+
 
 async def stage_plan_intent(
     db: Any,
@@ -77,6 +160,7 @@ async def stage_plan_intent(
     base_version: str = "",
     atomic_group_id: str = "",
     commit: bool = True,
+    deduplicate: bool = False,
 ) -> models.AgentPlanIntent:
     turn_key = str(turn_key or "").strip()
     effect_key = str(canonical_effect_key or "").strip()
@@ -130,6 +214,17 @@ async def stage_plan_intent(
         ).scalar_one_or_none()
 
     for attempt in range(5):
+        if deduplicate:
+            # Idempotent dedup: an identical invoke_action payload that is
+            # already staged into a still-open draft, or already sealed into a
+            # Plan still awaiting confirmation, must reuse that durable intent
+            # instead of staging a fresh copy that would seal a duplicate Plan
+            # and double-execute the same effect.
+            reusable = await _load_reusable_intent(
+                db, actor, tool_name=tool_name, args_digest=args_digest
+            )
+            if reusable is not None:
+                return validate_replay(reusable)
         draft = await load_draft()
         if draft is None:
             draft = models.AgentPlanDraft(
@@ -464,6 +559,7 @@ async def _materialize_intent_descriptors(
 def _normalize_descriptors(descriptors: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     nodes: list[dict[str, Any]] = []
     patch_indexes: dict[tuple[str, str, str], int] = {}
+    invoke_indexes: dict[tuple[str, str, str, str], int] = {}
     intent_node_index: dict[str, int] = {}
     descriptors = _coalesce_batch_triage_job_patches(descriptors)
     for descriptor in descriptors:
@@ -497,6 +593,23 @@ def _normalize_descriptors(descriptors: list[dict[str, Any]]) -> tuple[list[dict
                     intent_node_index[intent_key] = node_index
                 continue
             patch_indexes[key] = len(nodes)
+        if tool_name == "invoke_action":
+            # Dedup identical action+input at seal time: two staged intents that
+            # materialize to the same canonical payload (same action, same
+            # normalized input, same base_version, same atomic group) are the
+            # same effect and would double-execute if kept as separate nodes.
+            # Merging keeps the earliest node's position; the later intents are
+            # recorded as merged sources on that node instead. Any field that
+            # differs produces a different key and stays a distinct step.
+            invoke_key = (target_name, _digest(args), base_version, atomic_group_id)
+            if invoke_key in invoke_indexes:
+                node_index = invoke_indexes[invoke_key]
+                nodes[node_index]["source_intent_ids"].extend(source_intent_ids)
+                nodes[node_index]["source_effect_keys"].extend(source_effect_keys)
+                for intent_key in (*source_effect_keys, *source_intent_ids):
+                    intent_node_index[intent_key] = node_index
+                continue
+            invoke_indexes[invoke_key] = len(nodes)
         node_index = len(nodes)
         typed_outputs = _typed_outputs(tool_name, target_name)
         from app.operator.effect_manifest import build_execution_contract

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def read(path: str) -> str:
@@ -26,7 +26,6 @@ def main() -> None:
         "frontend/src/app/resume/components/templates/ResumeModernSingle.tsx",
         "frontend/src/app/resume/components/templates/ResumeModernTwoColumn.tsx",
         "frontend/src/app/resume/components/TemplateSelector.tsx",
-        "frontend/src/app/resume/components/MatchScorePanel.tsx",
         "frontend/src/app/resume/components/KeywordHighlightView.tsx",
         "frontend/src/app/resume/print/[id]/page.tsx",
     ]

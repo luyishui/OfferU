@@ -9,7 +9,7 @@
 import json
 import logging
 
-from app.agents.llm import chat_completion
+from app.services.llm import chat_completion
 
 _logger = logging.getLogger(__name__)
 

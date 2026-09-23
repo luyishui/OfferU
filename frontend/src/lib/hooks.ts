@@ -930,9 +930,9 @@ export async function generateProfileNarrative() {
   }>;
 }
 
-// ---- AI 简历优化 ----
+// ---- AI 简历优化建议采纳 ----
 
-/** AI 优化类型定义 */
+/** AI 优化建议（由 agent 流水线产出，前端仅展示/采纳） */
 export interface AiSuggestion {
   type: "bullet_rewrite" | "keyword_add" | "section_reorder";
   section_title?: string;
@@ -952,39 +952,6 @@ export interface AiOptimizeResult {
   };
   suggestions: AiSuggestion[];
   summary: string;
-}
-
-/** AI 优化简历（基于已有简历 ID） */
-export async function aiOptimizeResume(
-  resumeId: number,
-  data: { jd_text?: string; job_id?: number }
-): Promise<AiOptimizeResult> {
-  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/ai/optimize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `AI 优化失败 (${res.status})`);
-  }
-  return res.json();
-}
-
-/** AI 优化简历（纯文本粘贴） */
-export async function aiOptimizeText(
-  data: { resume_text: string; jd_text: string }
-): Promise<AiOptimizeResult> {
-  const res = await fetch(`${API_BASE}/api/resume/ai/optimize-text`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `AI 优化失败 (${res.status})`);
-  }
-  return res.json();
 }
 
 /** 应用单条 AI 建议到简历 */
@@ -1094,47 +1061,7 @@ export function useResumeTemplates() {
   return useSWR<ResumeTemplate[]>(`${API_BASE}/api/resume/templates`, fetcher);
 }
 
-// ---- AI Skill Pipeline 深度分析 ----
-
-/** JD 分析结果（Skill 1 输出） */
-export interface JdAnalysis {
-  job_title: string;
-  company: string;
-  is_campus: boolean;
-  required_skills: string[];
-  preferred_skills: string[];
-  responsibilities: string[];
-  experience_level: string;
-  industry_tags: string[];
-  culture_keywords: string[];
-}
-
-/** 段落评分明细 */
-export interface SectionScore {
-  section: string;
-  score: number;
-  feedback: string;
-}
-
-/** 匹配分析结果（Skill 2 输出） */
-export interface MatchAnalysis {
-  ats_score: number;
-  matched_skills: string[];
-  missing_skills: string[];
-  section_scores: SectionScore[];
-  risk_items: string[];
-  summary: string;
-}
-
-/** Pipeline 聚合结果 */
-export interface SkillAnalyzeResult {
-  jd_analysis: JdAnalysis;
-  match_analysis: MatchAnalysis;
-  content_rewrite?: ContentRewriteResult;
-  section_reorder?: SectionReorderResult;
-}
-
-/** 内容改写建议（Skill 3 输出） */
+/** 内容改写建议（AI 流水线产出，apply-batch 采纳载荷使用） */
 export interface RewriteSuggestion {
   type: "rewrite" | "inject";
   section_title: string;
@@ -1143,58 +1070,6 @@ export interface RewriteSuggestion {
   suggested: string;
   reason: string;
   injected_keywords: string[];
-}
-
-export interface ContentRewriteResult {
-  suggestions: RewriteSuggestion[];
-}
-
-/** 模块重排建议（Skill 4 输出） */
-export interface ReorderChange {
-  section: string;
-  action: "move_up" | "move_down" | "keep";
-  reason: string;
-}
-
-export interface SectionReorderResult {
-  current_order: string[];
-  suggested_order: string[];
-  reason: string;
-  changes: ReorderChange[];
-  error?: string;
-}
-
-/** Skill Pipeline 深度分析（基于已有简历 ID） */
-export async function aiAnalyzeResume(
-  resumeId: number,
-  data: { jd_text?: string; job_id?: number }
-): Promise<SkillAnalyzeResult> {
-  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/ai/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `AI 分析失败 (${res.status})`);
-  }
-  return res.json();
-}
-
-/** Skill Pipeline 深度分析（纯文本粘贴） */
-export async function aiAnalyzeText(
-  data: { resume_text: string; jd_text: string }
-): Promise<SkillAnalyzeResult> {
-  const res = await fetch(`${API_BASE}/api/resume/ai/analyze-text`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `AI 分析失败 (${res.status})`);
-  }
-  return res.json();
 }
 
 // ---- 投递管理 ----
@@ -1694,144 +1569,7 @@ export async function saveBossCookie(cookie: string) {
   return res.json();
 }
 
-// ---- 批量 AI 简历定制 (SSE 流式) ----
 
-export interface BatchOptimizeEntry {
-  job_id: number;
-  job_title: string;
-  company: string;
-  new_resume_id: number | null;
-  ats_score: number | null;
-  suggestions_applied: number;
-  status: "success" | "skipped" | "failed" | "pending";
-  error: string | null;
-  index: number;
-  total: number;
-}
-
-export interface BatchOptimizeResponse {
-  total: number;
-  success: number;
-  results: BatchOptimizeEntry[];
-}
-
-/**
- * 批量 AI 简历定制 — SSE 流式版本
- * 通过 onProgress 回调实时接收每个岗位的处理结果
- */
-export async function batchOptimizeResume(
-  resumeId: number,
-  jobIds: number[],
-  autoApply = true,
-  onProgress?: (entry: BatchOptimizeEntry) => void
-): Promise<BatchOptimizeResponse> {
-  const res = await fetch(`${API_BASE}/api/resume/${resumeId}/ai/batch-optimize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_ids: jobIds, auto_apply: autoApply }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `批量优化失败 (${res.status})`);
-  }
-
-  // 解析 SSE 流
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error("浏览器不支持流式响应");
-
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalResult: BatchOptimizeResponse | null = null;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    // 按双换行分割 SSE 事件
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-
-    for (const part of parts) {
-      const lines = part.trim().split("\n");
-      let eventType = "";
-      let data = "";
-
-      for (const line of lines) {
-        if (line.startsWith("event: ")) eventType = line.slice(7);
-        else if (line.startsWith("data: ")) data = line.slice(6);
-      }
-
-      if (!data) continue;
-
-      try {
-        const parsed = JSON.parse(data);
-        if (eventType === "progress" && onProgress) {
-          onProgress(parsed as BatchOptimizeEntry);
-        } else if (eventType === "done") {
-          finalResult = parsed as BatchOptimizeResponse;
-        }
-      } catch {
-        // 跳过无法解析的行
-      }
-    }
-  }
-
-  return finalResult || { total: jobIds.length, success: 0, results: [] };
-}
-
-// ---- Optimize 工作区（Profile -> JD 生成）----
-
-export interface OptimizeGenerateRequest {
-  job_ids: number[];
-  mode: "per_job" | "combined";
-  reference_resume_id?: number;
-}
-
-export interface OptimizeUsedBullet {
-  id: number;
-  section_type: string;
-  title: string;
-}
-
-export interface OptimizeGenerateResult {
-  mode: "per_job" | "combined";
-  resume_id: number;
-  resume_title: string;
-  reference_resume_id?: number | null;
-  job_id?: number;
-  job_title?: string;
-  job_ids?: number[];
-  used_bullets: OptimizeUsedBullet[];
-  missing_keywords: string[];
-  profile_hit_ratio: string;
-  index?: number;
-  total?: number;
-}
-
-export interface OptimizeProgressEvent {
-  index: number;
-  total: number;
-  status: "success" | "failed";
-  job_id?: number;
-  job_title?: string;
-  mode?: "per_job" | "combined";
-}
-
-export interface OptimizeDoneEvent {
-  mode: "per_job" | "combined";
-  total: number;
-  created: number;
-  failed: number;
-  resume_ids: number[];
-}
-
-export interface OptimizeStreamEvent {
-  event: string;
-  data: any;
-}
 
 // =============================================
 // Optimize Agent Chat Stream
@@ -2047,78 +1785,6 @@ export async function deleteOptimizeSession(sessionId: string): Promise<void> {
   }
 }
 
-export async function streamOptimizeGenerate(
-  payload: OptimizeGenerateRequest,
-  options?: {
-    signal?: AbortSignal;
-    onEvent?: (event: OptimizeStreamEvent) => void;
-  }
-) {
-  const res = await fetch(`${API_BASE}/api/optimize/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: options?.signal,
-  });
-
-  if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `定制生成失败 (${res.status})`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const findBoundary = (text: string) => {
-    const unix = text.indexOf("\n\n");
-    const windows = text.indexOf("\r\n\r\n");
-    if (unix === -1) return windows;
-    if (windows === -1) return unix;
-    return Math.min(unix, windows);
-  };
-
-  const emit = (chunk: string) => {
-    let eventName = "message";
-    const dataLines: string[] = [];
-
-    for (const line of chunk.split(/\r?\n/)) {
-      if (line.startsWith("event:")) {
-        eventName = line.slice(6).trim() || "message";
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trim());
-      }
-    }
-
-    if (dataLines.length === 0) return;
-    const dataText = dataLines.join("\n");
-    let data: any = dataText;
-    try {
-      data = JSON.parse(dataText);
-    } catch {
-      // server may send raw text payload in exceptional cases
-    }
-    options?.onEvent?.({ event: eventName, data });
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let boundary = findBoundary(buffer);
-    while (boundary >= 0) {
-      const separatorLength = buffer.slice(boundary, boundary + 4) === "\r\n\r\n" ? 4 : 2;
-      const block = buffer.slice(0, boundary).trim();
-      buffer = buffer.slice(boundary + separatorLength);
-      if (block) emit(block);
-      boundary = findBoundary(buffer);
-    }
-  }
-
-  const tail = buffer.trim();
-  if (tail) emit(tail);
-}
 
 // =============================================
 // Interview 面经题库 hooks

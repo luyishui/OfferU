@@ -1,136 +1,106 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Chip, Input, ScrollShadow, Textarea } from "@nextui-org/react";
 import {
   Bot,
-  Check,
   ChevronDown,
-  FileText,
   History,
   Loader2,
   Plus,
   Send,
-  Sparkles,
   Trash2,
   Upload,
-  User,
   X,
 } from "lucide-react";
 import { useSWRConfig } from "swr";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
-import { profileApi, type ProfileAgentPatch } from "@/lib/api";
+import {
+  agentStreamReducer,
+  applyProposalDecisionResponse,
+  createInitialAgentStreamState,
+  proposalDecisionUiTransition,
+  type AgentStreamState,
+  type DisplayAgentMessage,
+} from "@/lib/agentStreamReducer";
+import {
+  harnessAgentApi,
+  profileAgentChatStream,
+  profileApi,
+  type AgentStreamEvent,
+  type ProfileAgentSessionSummary,
+} from "@/lib/api";
+import {
+  AgentStreamMessageBubble,
+  ProposalList,
+  StreamingAssistantBubble,
+  ToolExecutionList,
+  makeDisplayMessage,
+} from "./AgentStreamView";
 import { useDraggableDock } from "./useDraggableDock";
 
-interface AgentMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-}
 
-function compactJsonPreview(value?: Record<string, any>) {
-  const normalized = value?.normalized && typeof value.normalized === "object" ? value.normalized : value;
-  return Object.entries(normalized || {})
-    .filter(([, item]) => {
-      if (Array.isArray(item)) return item.length > 0;
-      return item !== undefined && item !== null && String(item).trim() !== "";
-    })
-    .slice(0, 4)
-    .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(", ") : String(item)}`)
-    .join(" / ");
-}
-
-function stopReasonLabel(stopReason: string) {
-  if (stopReason === "needs_user_confirmation") return "等待确认";
-  if (stopReason === "needs_more_input") return "继续追问";
-  if (stopReason === "finished") return "已完成";
-  return "建档模式";
-}
-
-function profileSessionTitle(session: any) {
-  if (!session) return "档案对话";
-  const id = session.id ? `#${session.id}` : "";
-  const count = Number(session.extracted_bullets_count || 0);
-  return count > 0 ? `档案对话 ${id} / ${count} 条候选` : `档案对话 ${id}`;
+function welcomeState(): AgentStreamState {
+  return {
+    ...createInitialAgentStreamState(),
+    messages: [
+      makeDisplayMessage(
+        "assistant",
+        "把简历和目标岗位给我，我会先建一版档案，再围绕缺口继续追问。所有写入都会先变成可确认的提案。",
+        "welcome"
+      ),
+    ],
+  };
 }
 
 export function ProfileAgentDock() {
   const { mutate } = useSWRConfig();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const [open, setOpen] = useState(false);
-  const [sessionId, setSessionId] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [historySessions, setHistorySessions] = useState<any[]>([]);
+  const [historySessions, setHistorySessions] = useState<ProfileAgentSessionSummary[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversationTitle, setConversationTitle] = useState("新建档案对话");
+  const [agentState, setAgentState] = useState<AgentStreamState>(welcomeState);
   const [targetRole, setTargetRole] = useState("");
   const [targetCity, setTargetCity] = useState("");
   const [jobGoal, setJobGoal] = useState("");
   const [resumeText, setResumeText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<AgentMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "把简历和目标岗位给我，我会先建一版档案，再围绕缺口继续追问。",
-    },
-  ]);
-  const [patch, setPatch] = useState<ProfileAgentPatch | null>(null);
-  const [stopReason, setStopReason] = useState("");
-  const [traceCount, setTraceCount] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [applying, setApplying] = useState(false);
   const [error, setError] = useState("");
+  const [resolvedProposalIds, setResolvedProposalIds] = useState<Set<string>>(new Set());
+  const [confirmationChallenges, setConfirmationChallenges] = useState<Record<string, string>>({});
   const { dockRef, dockStyle, dragHandleProps, launcherDragHandleProps, consumeDragClick } =
     useDraggableDock<HTMLDivElement>({ width: 460, height: 720 });
 
-  const canStart = useMemo(
-    () => Boolean(file || resumeText.trim() || targetRole.trim() || jobGoal.trim()),
-    [file, jobGoal, resumeText, targetRole]
-  );
+  const canStart = Boolean(file || resumeText.trim() || targetRole.trim() || jobGoal.trim());
 
   const refreshHistory = async () => {
     try {
-      const sessions = (await profileApi.listChatSessions(50)) as any[];
-      setHistorySessions((sessions || []).filter((item) => item.topic === "profile_builder"));
+      const result = await profileApi.listProfileAgentSessions(50);
+      setHistorySessions(result.sessions || []);
     } catch {
       setHistorySessions([]);
     }
   };
 
   useEffect(() => {
-    if (open) refreshHistory();
+    if (open) void refreshHistory();
   }, [open]);
 
-  const pushMessage = (role: AgentMessage["role"], content: string) => {
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `${role}-${Date.now()}-${prev.length}`,
-        role,
-        content,
-      },
-    ]);
-  };
-
   const refreshProfile = () => {
-    mutate((key) => typeof key === "string" && key.includes("/api/profile/"));
+    void mutate((key) => typeof key === "string" && key.includes("/api/profile/"));
   };
 
-  const applyAgentResponse = (result: {
-    session_id: number;
-    patch: ProfileAgentPatch;
-    assistant_message?: string;
-    agent_trace?: Record<string, any>[];
-    stop_reason?: string;
-  }) => {
-    setSessionId(result.session_id);
-    setConversationTitle(`档案对话 #${result.session_id}`);
-    setPatch(result.patch);
-    setStopReason(result.stop_reason || "");
-    setTraceCount(result.agent_trace?.length || 0);
-    pushMessage("assistant", result.assistant_message || result.patch.next_question || "我继续整理了一版候选信息。");
-    refreshHistory();
+  const dispatchStreamEvent = (event: AgentStreamEvent) => {
+    setAgentState((prev) => agentStreamReducer(prev, event));
+    if (event.type === "final" && event.conversation_id) {
+      setConversationId(event.conversation_id);
+      setConversationTitle(`档案对话 ${event.conversation_id}`);
+    }
   };
 
   const startAgent = async () => {
@@ -145,105 +115,179 @@ export function ProfileAgentDock() {
         target_city: targetCity,
         job_goal: jobGoal,
       });
-      applyAgentResponse(result);
-    } catch (err: any) {
-      setError(err.message || "AI 建档启动失败");
+      const sessionId = String(result.session_id || result.conversation_id || "");
+      if (sessionId) {
+        setConversationId(sessionId);
+        setConversationTitle(`档案对话 ${sessionId}`);
+      }
+      const proposals = Array.isArray(result.proposals) ? result.proposals : [];
+      setAgentState((prev) => {
+        let next = agentStreamReducer(
+          { ...prev, status: "done" },
+          { type: "final", ...result, conversation_id: sessionId || result.conversation_id } as AgentStreamEvent
+        );
+        for (const proposal of proposals) {
+          next = agentStreamReducer(next, { type: "proposal", proposal });
+        }
+        if (result.assistant_message) {
+          next = {
+            ...next,
+            messages: [
+              ...next.messages,
+              makeDisplayMessage("assistant", String(result.assistant_message)),
+            ],
+          };
+        }
+        return next;
+      });
+      await refreshHistory();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "AI 建档启动失败");
     } finally {
       setLoading(false);
     }
   };
 
-  const sendMessage = async (message?: string) => {
-    const content = (message ?? input).trim();
+  const sendMessage = async (text?: string) => {
+    const content = (text ?? input).trim();
     if (!content || loading) return;
-    if (!sessionId) {
+    if (!conversationId) {
       setError("请先上传简历或填写目标岗位，启动建档会话。");
       return;
     }
     setInput("");
     setLoading(true);
     setError("");
-    pushMessage("user", content);
+
+    const userMessage = makeDisplayMessage("user", content);
+    setAgentState((prev) => ({
+      ...prev,
+      messages: [...prev.messages, userMessage],
+      status: "streaming",
+      error: "",
+    }));
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const result = await profileApi.sendProfileAgentMessage({
-        session_id: sessionId,
-        message: content,
-      });
-      applyAgentResponse(result);
-    } catch (err: any) {
-      setError(err.message || "AI 回复失败");
+      await profileAgentChatStream(
+        { session_id: conversationId, message: content },
+        { onEvent: dispatchStreamEvent },
+        controller.signal
+      );
+      refreshProfile();
+      await refreshHistory();
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        setError(err.message || "AI 回复失败");
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setLoading(false);
+    }
+  };
+
+  const confirmProposal = async (proposalId: string) => {
+    if (loading || !conversationId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const challenge = confirmationChallenges[proposalId];
+      const result = await harnessAgentApi.confirmProposal(
+        proposalId,
+        conversationId,
+        challenge ? { confirmation_challenge: challenge } : {}
+      );
+      const transition = proposalDecisionUiTransition(
+        resolvedProposalIds,
+        confirmationChallenges,
+        proposalId,
+        result
+      );
+      setResolvedProposalIds(transition.resolvedProposalIds);
+      setConfirmationChallenges(transition.confirmationChallenges);
+      if (result.continuation || result.next_proposals || result.plan_event) {
+        setAgentState((prev) => applyProposalDecisionResponse(prev, result));
+      }
+      refreshProfile();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "确认提案失败");
     } finally {
       setLoading(false);
     }
   };
 
-  const applyPatch = async () => {
-    if (!sessionId || !patch || applying) return;
-    setApplying(true);
+  const rejectProposal = async (proposalId: string) => {
+    if (loading || !conversationId) return;
+    setLoading(true);
     setError("");
     try {
-      await profileApi.applyProfileAgentPatch({ session_id: sessionId, patch });
-      refreshProfile();
-      pushMessage("assistant", "已写入个人档案。你可以继续补充经历，我会接着追问缺口。");
-      setPatch(null);
-      setStopReason("needs_more_input");
-      refreshHistory();
-    } catch (err: any) {
-      setError(err.message || "写入档案失败");
+      const result = await harnessAgentApi.rejectProposal(proposalId, conversationId);
+      setAgentState((prev) => applyProposalDecisionResponse(prev, result));
+      const transition = proposalDecisionUiTransition(
+        resolvedProposalIds,
+        confirmationChallenges,
+        proposalId,
+        result
+      );
+      setResolvedProposalIds(transition.resolvedProposalIds);
+      setConfirmationChallenges(transition.confirmationChallenges);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "拒绝提案失败");
     } finally {
-      setApplying(false);
+      setLoading(false);
     }
   };
 
   const resetSession = () => {
-    setSessionId(null);
-    setPatch(null);
+    abortRef.current?.abort();
+    setConversationId(null);
+    setConversationTitle("新建档案对话");
+    setResolvedProposalIds(new Set());
+    setConfirmationChallenges({});
     setFile(null);
     setResumeText("");
     setInput("");
     setError("");
-    setStopReason("");
-    setTraceCount(0);
-    setConversationTitle("新建档案对话");
     setHistoryOpen(false);
-    setMessages([
-      {
-        id: "welcome-reset",
-        role: "assistant",
-        content: "重新开始。把简历和目标岗位给我，我来建档。",
-      },
-    ]);
+    setAgentState(welcomeState());
   };
 
-  const loadHistorySession = async (id: number) => {
+  const loadHistorySession = async (id: string) => {
     setError("");
     try {
       const session = await profileApi.getProfileAgentSession(id);
-      const chatMessages = (session.messages_json || [])
-        .filter((item: any) => item?.role === "user" || item?.role === "assistant")
-        .map((item: any, index: number) => ({
+      const messages = (session.messages_json || [])
+        .filter((item) => item?.role === "user" || item?.role === "assistant")
+        .map((item, index): DisplayAgentMessage => ({
           id: `history-${id}-${index}`,
-          role: item.role as AgentMessage["role"],
-          content: String(item.content || ""),
+          role: item.role as DisplayAgentMessage["role"],
+          text: String(item.content || ""),
         }));
-      setSessionId(id);
-      setConversationTitle(`档案对话 #${id}`);
-      setMessages(chatMessages.length ? chatMessages : [{ id: `history-empty-${id}`, role: "assistant", content: "已打开历史对话。" }]);
-      setPatch((session.pending_patch as ProfileAgentPatch | null) || null);
-      setStopReason("");
-      setTraceCount(0);
+      setConversationId(id);
+      setConversationTitle(session.title || `档案对话 ${id}`);
+      setResolvedProposalIds(new Set());
+      setConfirmationChallenges({});
+      setAgentState({
+        ...createInitialAgentStreamState(),
+        messages: messages.length
+          ? messages
+          : [makeDisplayMessage("assistant", "已打开历史对话。")],
+      });
       setHistoryOpen(false);
-    } catch (err: any) {
-      setError(err.message || "加载历史对话失败");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "加载历史对话失败");
     }
   };
 
   useEffect(() => {
     const handleOpenProfileAgent = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: number }>).detail || {};
+      const detail = (event as CustomEvent<{ sessionId?: string | number }>).detail || {};
       setOpen(true);
       if (detail.sessionId) {
-        void loadHistorySession(Number(detail.sessionId));
+        void loadHistorySession(String(detail.sessionId));
       } else {
         void refreshHistory();
       }
@@ -308,13 +352,8 @@ export function ProfileAgentDock() {
                 档案建模
               </Chip>
               <Chip variant="flat" className="bauhaus-chip border-2 border-black bg-[#F7E4E1] px-3 py-2 text-black">
-                {stopReasonLabel(stopReason)}
+                {loading ? "处理中" : "就绪"}
               </Chip>
-              {traceCount > 0 && (
-                <Chip variant="flat" className="bauhaus-chip border-2 border-black bg-white px-3 py-2 text-black">
-                  {traceCount} 步
-                </Chip>
-              )}
             </div>
           </header>
 
@@ -341,13 +380,15 @@ export function ProfileAgentDock() {
                   <button
                     key={session.id}
                     type="button"
-                    onClick={() => loadHistorySession(Number(session.id))}
+                    onClick={() => void loadHistorySession(session.id)}
                     className={`w-full border px-3 py-2 text-left ${
-                      Number(session.id) === sessionId ? "border-black bg-[#FFF4D8]" : "border-black/20 bg-white"
+                      session.id === conversationId ? "border-black bg-[#FFF4D8]" : "border-black/20 bg-white"
                     }`}
                   >
-                    <p className="truncate text-xs font-black text-black">{profileSessionTitle(session)}</p>
-                    <p className="mt-0.5 text-[11px] font-medium text-black/55">{session.status || "active"}</p>
+                    <p className="truncate text-xs font-black text-black">{session.title || "档案对话"}</p>
+                    <p className="mt-0.5 text-[11px] font-medium text-black/55">
+                      {session.message_count} 条 / {session.last_message}
+                    </p>
                   </button>
                 ))}
               </div>
@@ -355,7 +396,7 @@ export function ProfileAgentDock() {
           )}
 
           <ScrollShadow className="flex-1 overflow-y-auto p-4">
-            {!sessionId && (
+            {!conversationId && (
               <div className="bauhaus-panel-sm mb-4 space-y-3 bg-white p-3">
                 <input
                   ref={fileInputRef}
@@ -400,71 +441,28 @@ export function ProfileAgentDock() {
             )}
 
             <div className="space-y-4">
-              {messages.map((message) => (
-                <DockMessageBubble key={message.id} message={message} />
+              {agentState.messages.map((message) => (
+                <AgentStreamMessageBubble key={message.id} message={message} compact />
               ))}
-              {loading && (
+              {agentState.streaming && <StreamingAssistantBubble streaming={agentState.streaming} compact />}
+              {loading && !agentState.streaming && (
                 <div className="inline-flex items-center gap-2 border-2 border-black bg-white px-4 py-3 text-[15px] font-medium text-black/65 shadow-[2px_2px_0_0_rgba(18,18,18,0.3)]">
                   <Loader2 size={13} className="animate-spin" />
                   <span>AI 正在整理...</span>
                 </div>
               )}
+              <ToolExecutionList executions={agentState.toolExecutions} />
             </div>
 
-            {patch && (
-              <div className="bauhaus-panel-sm mt-4 space-y-3 bg-[#F9F3DC] p-3">
-                <div className="flex items-center gap-2 text-sm font-bold text-black">
-                  <FileText size={16} />
-                  <span>待确认写入</span>
-                </div>
-                {Object.keys(patch.base_info || {}).length > 0 && (
-                  <div className="border-2 border-black bg-white px-3 py-2 text-xs leading-relaxed text-black/70">
-                    基础信息：{compactJsonPreview(patch.base_info)}
-                  </div>
-                )}
-                {patch.target_roles?.length > 0 && (
-                  <div className="border-2 border-black bg-white px-3 py-2 text-xs leading-relaxed text-black/70">
-                    目标岗位：{patch.target_roles.join("、")}
-                  </div>
-                )}
-                <div className="space-y-2">
-                  {patch.sections?.map((section, index) => (
-                    <div key={`${section.title}-${index}`} className="border-2 border-black bg-white px-3 py-2 shadow-[2px_2px_0_0_rgba(18,18,18,0.18)]">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="text-sm font-bold text-black">{section.title}</p>
-                        <span className="shrink-0 text-[11px] font-semibold text-black/45">
-                          {Math.round((section.confidence || 0) * 100)}%
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs leading-relaxed text-black/60">
-                        {compactJsonPreview(section.content_json) || section.section_type}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-                {patch.next_question && (
-                  <p className="text-xs font-medium leading-relaxed text-black/60">下一步：{patch.next_question}</p>
-                )}
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    startContent={<Check size={15} />}
-                    isLoading={applying}
-                    onPress={applyPatch}
-                    className="bauhaus-button bauhaus-button-red !min-h-10 !px-3 !py-2 !text-xs"
-                  >
-                    确认写入
-                  </Button>
-                  <Button
-                    variant="light"
-                    onPress={() => sendMessage("请继续追问我还缺什么信息")}
-                    isDisabled={loading}
-                    className="bauhaus-button bauhaus-button-outline !min-h-10 !px-3 !py-2 !text-xs"
-                  >
-                    继续追问
-                  </Button>
-                </div>
-              </div>
-            )}
+            <div className="mt-4">
+              <ProposalList
+                proposals={agentState.proposals}
+                resolvedIds={resolvedProposalIds}
+                loading={loading}
+                onConfirm={(id) => void confirmProposal(id)}
+                onReject={(id) => void rejectProposal(id)}
+              />
+            </div>
           </ScrollShadow>
 
           {error && <div className="border-t border-black/10 bg-[#D02020] px-4 py-2 text-xs font-medium text-white">{error}</div>}
@@ -480,19 +478,19 @@ export function ProfileAgentDock() {
                 variant="bordered"
                 className="flex-1"
                 classNames={bauhausFieldClassNames}
-                isDisabled={!sessionId || loading}
+                isDisabled={!conversationId || loading}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    sendMessage();
+                    void sendMessage();
                   }
                 }}
               />
               <Button
                 isIconOnly
                 aria-label="发送给 AI 建档助手"
-                isDisabled={!sessionId || !input.trim() || loading}
-                onPress={() => sendMessage()}
+                isDisabled={!conversationId || !input.trim() || loading}
+                onPress={() => void sendMessage()}
                 className="bauhaus-button bauhaus-button-red !mb-[2px] !min-h-11 !min-w-11 !px-0 !py-0"
               >
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
@@ -514,32 +512,6 @@ export function ProfileAgentDock() {
       >
         {open ? <X size={22} /> : <Bot size={24} />}
       </Button>
-    </div>
-  );
-}
-
-function DockMessageBubble({ message }: { message: AgentMessage }) {
-  const isUser = message.role === "user";
-
-  return (
-    <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-      <div
-        className={`flex h-10 w-10 shrink-0 items-center justify-center border-2 border-black ${
-          isUser ? "bg-[#D02020] text-white" : "bg-[#F0C020] text-black"
-        }`}
-      >
-        {isUser ? <User size={15} /> : <Sparkles size={15} />}
-      </div>
-
-      <div className={`max-w-[86%] ${isUser ? "text-right" : ""}`}>
-        <div
-          className={`inline-block whitespace-pre-wrap border-2 border-black px-3.5 py-3 text-sm font-medium leading-6 shadow-[3px_3px_0_0_rgba(18,18,18,0.24)] ${
-            isUser ? "bg-[#F7E4E1] text-black" : "bg-white text-black"
-          }`}
-        >
-          {message.content}
-        </div>
-      </div>
     </div>
   );
 }

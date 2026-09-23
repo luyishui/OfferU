@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.llm import chat_completion, extract_json
+from app.services.llm import chat_completion, extract_json
 from app.database import get_db
 from app.models.models import (
     Profile,
@@ -52,10 +52,10 @@ from app.services.profile_schema import (
     normalize_base_info_payload,
     normalize_section_type_alias,
 )
-from app.services.profile_builder_agent import build_initial_agent_state, normalize_profile_agent_patch
+
 
 try:
-    from app.agents.skills.conversational_extractor import generate_instant_draft as _generate_instant_draft
+    from app.services.instant_draft import generate_instant_draft as _generate_instant_draft
 except Exception:
     _generate_instant_draft = None
 
@@ -70,7 +70,7 @@ PROFILE_CATEGORY_ORDER = ["education", "experience", "project", "skill", "certif
 ALLOWED_RESUME_IMPORT_EXTENSIONS = {".pdf", ".docx"}
 MAX_RESUME_IMPORT_FILE_SIZE = 10 * 1024 * 1024
 RESUME_IMPORT_MODES = {"ai", "mechanical"}
-PROFILE_AGENT_TOPIC = "profile_builder"
+
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -378,29 +378,6 @@ def _normalize_candidate(topic: str, candidate: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _fallback_chat_payload(topic: str, user_message: str) -> dict[str, Any]:
-    normalized_topic = normalize_section_type_alias(topic)
-    if normalized_topic in {"general", "activity", "competition"}:
-        normalized_topic = "custom"
-    if not is_valid_profile_section_type(normalized_topic):
-        normalized_topic = "custom"
-
-    return {
-        "assistant_message": (
-            "这段已经能成为可写进简历的素材，我先帮你留一条候选。"
-            "如果要写得更像样，还差几个 proof points：金额、人数/规模、你具体做的动作、最后结果。"
-            "你记得哪个先补哪个。"
-        ),
-        "bullet_candidates": [
-            {
-                "section_type": normalized_topic,
-                "title": "待确认经历条目",
-                "content_json": {"bullet": user_message.strip()},
-                "confidence": 0.55,
-            }
-        ],
-        "topic_complete": False,
-    }
 
 
 def _build_profile_chat_prompt(topic: str) -> str:
@@ -458,21 +435,21 @@ async def _generate_chat_payload(topic: str, user_message: str) -> dict[str, Any
             max_tokens=1000,
             tier="standard",
         )
-    except Exception:
-        return _fallback_chat_payload(topic, user_message)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="profile chat AI completion failed") from exc
 
     parsed = extract_json(llm_result or "")
     if not isinstance(parsed, dict):
-        return _fallback_chat_payload(topic, user_message)
+        raise HTTPException(status_code=502, detail="profile chat AI returned malformed payload")
 
-    assistant_message = str(parsed.get("assistant_message") or "我已整理候选条目，请确认。")
+    assistant_message = str(parsed.get("assistant_message") or "").strip()
+    if not assistant_message:
+        raise HTTPException(status_code=502, detail="profile chat AI returned empty assistant_message")
+
     raw_candidates = parsed.get("bullet_candidates")
-    if not isinstance(raw_candidates, list) or len(raw_candidates) == 0:
-        return _fallback_chat_payload(topic, user_message)
-
-    candidates = [_normalize_candidate(topic, item) for item in raw_candidates[:3] if isinstance(item, dict)]
-    if not candidates:
-        return _fallback_chat_payload(topic, user_message)
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        candidates = [_normalize_candidate(topic, item) for item in raw_candidates[:3] if isinstance(item, dict)]
 
     return {
         "assistant_message": assistant_message,
@@ -1297,63 +1274,6 @@ def _resume_import_memory_summary(
     }
 
 
-def _build_resume_import_agent_messages(
-    *,
-    filename: str,
-    parse_mode: str,
-    parsed_text: str,
-    base_info: dict[str, Any],
-    candidates: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    target_role = str(base_info.get("job_intention") or "").strip()
-    target_city = str(base_info.get("current_city") or "").strip()
-    state = build_initial_agent_state(
-        resume_text=parsed_text,
-        target_role=target_role,
-        target_city=target_city,
-        job_goal="",
-        extracted_base_info=base_info,
-        resume_candidates=candidates,
-    )
-    mode_label = "AI 精准解析" if parse_mode == "ai" else "原版机械解析"
-    patch = normalize_profile_agent_patch(
-        {
-            "action": "propose_patch" if (base_info or candidates) else "ask_user",
-            "assistant_message": (
-                f"我已经用{mode_label}读完这份简历，并把解析结果同步成档案记忆。"
-                "你可以先确认写入，也可以直接问我哪段经历需要合并、补强或改写。"
-            ),
-            "base_info": base_info,
-            "target_roles": [target_role] if target_role else [],
-            "sections": candidates,
-            "next_question": "要不要我先检查哪些经历被拆错、哪些经历最该合并成一个描述框？",
-            "confidence": 0.78 if parse_mode == "ai" else 0.62,
-        }
-    )
-    messages_json = [
-        {
-            "kind": "profile_agent_start",
-            "agent": PROFILE_AGENT_TOPIC,
-            "source": "resume_import",
-            "filename": filename,
-            "parse_mode": parse_mode,
-            "resume_text_length": len(parsed_text),
-            "target_role": target_role,
-            "target_city": target_city,
-            "job_goal": "",
-        },
-        _resume_import_memory_summary(
-            filename=filename,
-            parse_mode=parse_mode,
-            parsed_text=parsed_text,
-            base_info=base_info,
-            candidates=candidates,
-        ),
-        {"kind": "profile_agent_state", "agent": PROFILE_AGENT_TOPIC, "state": state},
-        {"role": "assistant", "topic": PROFILE_AGENT_TOPIC, "content": patch["assistant_message"]},
-        {"kind": "profile_agent_patch", "agent": PROFILE_AGENT_TOPIC, "patch": patch, "applied": False},
-    ]
-    return messages_json, patch
 
 
 @router.get("/")
@@ -2104,24 +2024,8 @@ async def import_profile_resume(
         extracted_bullets_count=len(candidates),
     )
     db.add(session)
-    agent_messages_json, _agent_patch = _build_resume_import_agent_messages(
-        filename=filename,
-        parse_mode=normalized_parse_mode,
-        parsed_text=parsed_text,
-        base_info=base_info,
-        candidates=candidates,
-    )
-    agent_session = ProfileChatSession(
-        profile_id=profile.id,
-        topic=PROFILE_AGENT_TOPIC,
-        status="active",
-        messages_json=agent_messages_json,
-        extracted_bullets_count=len(candidates),
-    )
-    db.add(agent_session)
     await db.commit()
     await db.refresh(session)
-    await db.refresh(agent_session)
 
     bullets = [
         {
@@ -2134,7 +2038,6 @@ async def import_profile_resume(
 
     return {
         "session_id": session.id,
-        "agent_session_id": agent_session.id,
         "filename": filename,
         "parse_mode": normalized_parse_mode,
         "text_length": len(parsed_text),
@@ -2181,11 +2084,7 @@ async def generate_narrative(db: AsyncSession = Depends(get_db)):
     except Exception:
         parsed = None
     if not isinstance(parsed, dict):
-        parsed = {
-            "headline": profile.headline or "正在构建中的求职者",
-            "exit_story": profile.exit_story or "基于现有经历，持续补全并打磨个人叙事。",
-            "cross_cutting_advantage": profile.cross_cutting_advantage or "学习快、执行稳、可迁移能力强。",
-        }
+        raise HTTPException(status_code=502, detail="narrative generation failed")
 
     profile.headline = str(parsed.get("headline") or profile.headline or "")
     profile.exit_story = str(parsed.get("exit_story") or profile.exit_story or "")
@@ -2212,34 +2111,15 @@ async def instant_draft(data: InstantDraftRequest):
 
     target_roles = [item.strip() for item in data.target_roles if isinstance(item, str) and item.strip()]
 
-    if _generate_instant_draft is not None:
-        try:
-            generated = await _generate_instant_draft(experiences=experiences, target_roles=target_roles)
-            if isinstance(generated, dict) and generated:
-                return generated
-        except Exception:
-            pass
-
-    role_text = "、".join(target_roles) if target_roles else "通用岗位"
-    sections = []
-    for exp in experiences[:5]:
-        sections.append(
-            {
-                "section_type": "project",
-                "title": exp,
-                "bullets": [
-                    f"负责{exp}相关事项，完成关键任务，[具体成果待补充]",
-                    "与团队协作推进项目落地，[数据指标待补充]",
-                ],
-            }
-        )
-
-    return {
-        "headline": f"面向{role_text}方向的候选人",
-        "sections": sections,
-        "missing_hints": ["请补充量化结果（如增长、转化、效率）", "请补充时间范围和你的具体角色"],
-        "encouragement": "你已经有很好的素材，补上细节后会非常有竞争力。",
-    }
+    if _generate_instant_draft is None:
+        raise HTTPException(status_code=503, detail="instant draft service unavailable")
+    try:
+        generated = await _generate_instant_draft(experiences=experiences, target_roles=target_roles)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="instant draft generation failed") from exc
+    if not isinstance(generated, dict) or not generated:
+        raise HTTPException(status_code=502, detail="instant draft generation returned empty result")
+    return generated
 
 
 def _collect_profile_strings(payload: Any, output: set[str]) -> None:

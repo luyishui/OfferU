@@ -167,6 +167,7 @@ async def verify_resume_generate_readiness(
     actor: ActorContext | None,
     *,
     allow_transitional_readback: bool = False,
+    require_strategy_confirmed: bool = True,
 ) -> dict[str, Any]:
     if session is None or actor is None:
         return {
@@ -231,7 +232,7 @@ async def verify_resume_generate_readiness(
             "current_step": state.current_step,
             "recovery": recovery,
         }
-    if state.readiness_gates.get("strategy_confirmed") is not True:
+    if require_strategy_confirmed and state.readiness_gates.get("strategy_confirmed") is not True:
         return {
             "ok": False,
             "message": (
@@ -304,6 +305,46 @@ def _readiness_recovery_for(profile_evidence: Any, job_evidence: Any, strategy_c
 async def is_resume_skill_ready_for_generate(session: Any, actor: ActorContext | None) -> bool:
     readiness = await verify_resume_generate_readiness(session, actor)
     return bool(readiness.get("ok"))
+
+async def record_resume_strategy_confirmation(
+    session: Any,
+    actor: ActorContext | None,
+) -> SkillInstanceState | None:
+    """Record the durable strategy decision delivered by a proposal confirm.
+
+    In the harness path the ``generate_resume`` proposal preview is the
+    strategy the user approves; confirming that proposal (or the plan group
+    containing it) is a real authenticated user decision — the same decision
+    the legacy optimize flow records via ``action == 'confirm'``. This merges
+    ``strategy_confirmed`` into the already-active resume-optimizer skill's
+    durable readiness gates, preserving collected read evidence.
+
+    Returns ``None`` without writing when no active resume-optimizer skill is
+    present — this helper never fabricates skill activation or evidence.
+    """
+    if session is None or actor is None:
+        return None
+    state = await load_harness_skill_state(session, actor)
+    if state.skill_name != RESUME_GENERATE_SKILL_NAME:
+        return None
+    if str(state.status or "").strip().lower() != RESUME_GENERATE_READY_STATUS:
+        return None
+    if state.readiness_gates.get("strategy_confirmed") is True:
+        return state
+    gates = dict(state.readiness_gates)
+    gates["strategy_confirmed"] = True
+    return await set_active_skill_state(
+        session,
+        actor,
+        skill_name=state.skill_name,
+        skill_step="strategy_confirmed",
+        status=state.status,
+        readiness_gates=gates,
+        metadata=dict(state.metadata),
+        source="proposal_confirmation",
+        parent_task_id=state.parent_task_id,
+        parent_step_id=state.parent_step_id,
+    )
 
 
 async def _load_harness_skill_mapping(session: Any, actor: ActorContext) -> Mapping[str, Any] | None:

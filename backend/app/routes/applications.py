@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.cover_letter import generate_cover_letter
+from app.services.cover_letter import generate_cover_letter
 from app.database import get_db
 from app.models.models import Application, Batch, Job, Resume
 from app.services.application_workspace import (

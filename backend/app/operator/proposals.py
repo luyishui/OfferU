@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from types import SimpleNamespace
@@ -448,6 +448,37 @@ async def _execute_plan_node_projection(
     result.setdefault("before", snapshot.before if isinstance(snapshot.before, Mapping) else {})
     result["_effect_manifest"] = effect_manifest
     return result
+
+
+async def _mark_resume_strategy_confirmed_by_proposal(
+    session: AsyncSession,
+    actor: ActorContext,
+    *,
+    generate_resume_confirmed: bool,
+) -> None:
+    """Record the strategy decision delivered by a proposal confirm.
+
+    In the harness path the ``generate_resume`` proposal preview is the
+    strategy the user approves; a real confirm is the durable user decision
+    the ``strategy_confirmed`` readiness gate exists for. Only merges into an
+    already-active resume-optimizer skill (never fabricates skill state), and
+    never touches the evidence gates — profile/job read evidence still must
+    come from real Operator tool traces.
+    """
+    if not generate_resume_confirmed:
+        return
+    await skill_runtime.record_resume_strategy_confirmation(session, actor)
+
+
+def _proposal_is_generate_resume(proposal: Any) -> bool:
+    if str(getattr(proposal, "tool_name", "") or "") != "invoke_action":
+        return False
+    locked = getattr(proposal, "locked_payload", None)
+    action = str(locked.get("action") or "") if isinstance(locked, Mapping) else ""
+    return (
+        str(getattr(proposal, "model_or_action", "") or "") == "generate_resume"
+        or action == "generate_resume"
+    )
 
 
 async def _confirm_plan_group_proposal(
@@ -905,6 +936,25 @@ async def _execute_and_finalize_authorized_plan(
         ),
         name=f"plan-group-execution-heartbeat:{proposal_id_value}",
     )
+    # A generate_resume node inside this group makes the group confirm the
+    # durable strategy decision: the proposal preview is the strategy the
+    # user approved. Record it before any node executes so the confirm-time
+    # readiness re-check sees the durable gate.
+    generate_resume_node_id = await session.scalar(
+        select(models.OperationNode.node_id)
+        .where(
+            models.OperationNode.plan_id == plan_id_value,
+            models.OperationNode.confirmation_group_id == group_id_value,
+            models.OperationNode.tool_name == "invoke_action",
+            models.OperationNode.target_name == "generate_resume",
+        )
+        .limit(1)
+    )
+    await _mark_resume_strategy_confirmed_by_proposal(
+        session, actor, generate_resume_confirmed=generate_resume_node_id is not None
+    )
+
+
 
     async def production_handler(node: models.OperationNode, payload: Mapping[str, Any]) -> dict[str, Any]:
         return await _execute_plan_node_projection(session, actor, node, payload)
@@ -1315,6 +1365,14 @@ async def confirm_proposal(
                         "summary": "Replay ignored; provide the backend-issued confirmation challenge to execute.",
                     },
                 }
+        # A confirmed generate_resume proposal is the durable strategy
+        # decision in the harness path: the proposal preview is the strategy
+        # the user approved. Record it before the read-only prepare re-checks
+        # readiness so confirm can complete; a failed confirm rolls this back
+        # with the rest of the transaction.
+        await _mark_resume_strategy_confirmed_by_proposal(
+            session, actor, generate_resume_confirmed=_proposal_is_generate_resume(proposal)
+        )
 
         # Final confirmation path: prepare and execute.
         try:
@@ -2227,8 +2285,6 @@ def _invoke_action_preparers() -> dict[str, Any]:
         "interview_generate_answer": _prepare_interview_generate_answer_action,
         "interview_extract_questions": _prepare_interview_extract_questions_action,
         "calendar_auto_fill": _prepare_calendar_auto_fill_action,
-        "optimize_resume": _prepare_optimize_resume_action,
-        "batch_optimize_resume": _prepare_batch_optimize_resume_action,
         "apply_resume_ai_patch": _prepare_apply_resume_ai_patch_action,
         "parse_resume": _prepare_parse_resume_action,
         "upload_resume_photo": _prepare_resume_asset_action,
@@ -2998,7 +3054,7 @@ async def _prepare_generate_cover_letter_action(
 
     async def execute() -> dict[str, Any]:
         await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
-        cover_letter = _deterministic_cover_letter(job, application, tone)
+        cover_letter = await _generate_cover_letter_llm(session, actor, job, tone)
         if not cover_letter.strip():
             raise OperatorError(
                 "transient_error",
@@ -3291,7 +3347,7 @@ async def _prepare_prepare_application_material_action(
 
     async def execute() -> dict[str, Any]:
         await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
-        cover_letter = _deterministic_cover_letter(job, application, tone)
+        cover_letter = await _generate_cover_letter_llm(session, actor, job, tone)
         if constraints:
             cover_letter = f"{cover_letter.rstrip()}\n\n用户约束:{constraints[:280]}"
         if not cover_letter.strip():
@@ -3439,11 +3495,13 @@ async def _prepare_interview_extract_questions_action(
 
     async def execute() -> dict[str, Any]:
         await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
-        extracted = _extract_interview_questions_from_text(
+        from app.services.interview_prep import extract_questions as _llm_extract
+
+        extracted = await _llm_extract(
             company=str(experience.company or ""),
             role=str(experience.role or ""),
             raw_text=str(experience.raw_text or ""),
-        )
+        ) or {}
         questions_payload = extracted.get("questions") or []
         if not questions_payload:
             raise OperatorError(
@@ -3567,182 +3625,6 @@ async def _prepare_calendar_auto_fill_action(
     return execute
 
 
-def _extract_interview_questions_from_text(*, company: str, role: str, raw_text: str) -> dict[str, Any]:
-    text = str(raw_text or "").strip()
-    if not text:
-        return {"rounds": [], "questions": []}
-    rounds = _extract_interview_rounds(text)
-    questions: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add_question(question_text: str, *, source_line: str = "") -> None:
-        normalized = _normalize_question_text(question_text)
-        if not normalized:
-            return
-        key = normalized.casefold()
-        if key in seen:
-            return
-        seen.add(key)
-        context = f"{source_line}\n{normalized}"
-        questions.append(
-            {
-                "question_text": normalized,
-                "round_type": _infer_round_type(context),
-                "category": _infer_question_category(context, company=company, role=role),
-                "difficulty": _infer_question_difficulty(context),
-            }
-        )
-
-    for line in _candidate_question_lines(text):
-        cleaned = re.sub(r"^\s*(?:Q\d*|Question\s*\d*|问题\s*\d*|问)\s*[:：.-]\s*", "", line, flags=re.IGNORECASE)
-        for fragment in _split_question_fragments(cleaned):
-            add_question(fragment, source_line=line)
-
-    for pattern in (
-        r"\basked\s+(?:me\s+)?(?:about\s+)?(?P<body>how\s+to\s+[^.?!\n]+)",
-        r"\basked\s+(?:me\s+)?(?P<body>why\s+[^.?!\n]+)",
-        r"\basked\s+(?:me\s+)?(?P<body>what\s+[^.?!\n]+)",
-    ):
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            add_question(match.group("body"), source_line=match.group(0))
-
-    for fragment, source in _colloquial_chinese_asked_fragments(text):
-        question_text = _questionize_interview_topic(fragment)
-        add_question(question_text, source_line=source)
-
-    return {
-        "rounds": rounds or sorted({item["round_type"] for item in questions if item.get("round_type")}),
-        "questions": questions,
-    }
-
-
-def _candidate_question_lines(text: str) -> list[str]:
-    lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
-    candidates: list[str] = []
-    for line in lines:
-        if "?" in line or "？" in line:
-            candidates.append(line)
-            continue
-        if re.match(r"^\s*(?:Q\d*|Question\s*\d*|问题\s*\d*|问)\s*[:：.-]", line, flags=re.IGNORECASE):
-            candidates.append(line)
-    return candidates
-
-
-def _split_question_fragments(line: str) -> list[str]:
-    parts = re.split(r"[?？]+", str(line or ""))
-    fragments: list[str] = []
-    for index, part in enumerate(parts):
-        cleaned = part.strip(" \t\r\n:：;；,，。.")
-        if not cleaned:
-            continue
-        if index < len(parts) - 1 or _question_text_detected(cleaned):
-            fragments.append(cleaned)
-    return fragments
-
-
-def _colloquial_chinese_asked_fragments(text: str) -> list[tuple[str, str]]:
-    fragments: list[tuple[str, str]] = []
-    for match in re.finditer(
-        r"(?:面试官|hr|HR|leader|主管|对方|一面|二面|三面)?\s*(?:主要)?(?:问了|问到|问的是|提问了|追问了|问(?!题|卷|候|答))\s*(?P<body>[^。！？?!\n]+)",
-        str(text or ""),
-        flags=re.IGNORECASE,
-    ):
-        body = match.group("body")
-        body = re.sub(r"^(?:我|你|关于|一下|几个|这些|这个|那个)\s*", "", body.strip())
-        body = re.sub(r"^(?:[一二三四五六七八九十0-9]+个)?问题\s*[:：]\s*", "", body)
-        body = re.sub(r"(?:，|,)?\s*(?:还有|以及|然后|另外|再就是|和|还追着问|还追问|追着问|追问)\s*", "、", body)
-        for item in re.split(r"[、,，;；/]+", body):
-            cleaned = item.strip(" \t\r\n:：;；,，。.！？?!")
-            cleaned = re.sub(r"^(?:关于|一下|一个|几个|就是)\s*", "", cleaned)
-            cleaned = re.sub(r"^\d+\s*[\.．、:：]\s*", "", cleaned)
-            if len(cleaned) < 3:
-                continue
-            fragments.append((cleaned, match.group(0)))
-    return fragments
-
-
-def _questionize_interview_topic(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" \t\r\n:：;；,，。.！？?!")
-    if not cleaned:
-        return ""
-    if _question_text_detected(cleaned):
-        return cleaned
-    if any(token in cleaned for token in ("优先级", "重点", "重要", "排序")):
-        return f"如何判断{cleaned}"
-    if any(token in cleaned for token in ("竞品", "入口", "方案", "策略", "设计", "功能")):
-        return f"如何分析{cleaned}"
-    return f"如何说明{cleaned}"
-
-
-def _normalize_question_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" \t\r\n:：;；,，。.")
-    if not cleaned:
-        return ""
-    cleaned = re.sub(r"^(?:asked\s+(?:me\s+)?(?:about\s+)?)", "", cleaned, flags=re.IGNORECASE).strip()
-    how_to_match = re.match(r"^how\s+to\s+(.+)$", cleaned, flags=re.IGNORECASE)
-    if how_to_match:
-        cleaned = f"How would you {how_to_match.group(1).strip()}"
-    elif cleaned and cleaned[0].isascii():
-        cleaned = cleaned[:1].upper() + cleaned[1:]
-    if not _question_text_detected(cleaned):
-        return ""
-    if cleaned.endswith(("?", "？")):
-        return cleaned
-    return f"{cleaned}?"
-
-
-def _question_text_detected(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    if lowered.startswith(("how ", "why ", "what ", "when ", "where ", "which ", "who ", "can ", "could ", "would ", "do ", "does ", "did ")):
-        return True
-    return any(token in text for token in ("如何", "为什么", "什么", "哪", "是否", "能否", "怎么", "请介绍"))
-
-
-def _extract_interview_rounds(text: str) -> list[str]:
-    mapping = (
-        ("hr", ("HR", "hr", "人力", "终面", "final")),
-        ("final", ("终面", "final", "最后一轮")),
-        ("department", ("业务面", "技术面", "一面", "二面", "department", "technical")),
-    )
-    rounds: list[str] = []
-    for normalized, markers in mapping:
-        if any(marker in text for marker in markers) and normalized not in rounds:
-            rounds.append(normalized)
-    return rounds
-
-
-def _infer_round_type(text: str) -> str:
-    lowered = str(text or "").lower()
-    if "hr" in lowered or "人力" in text:
-        return "hr"
-    if "final" in lowered or "终面" in text:
-        return "final"
-    return "department"
-
-
-def _infer_question_category(text: str, *, company: str, role: str) -> str:
-    lowered = str(text or "").lower()
-    if any(token in lowered for token in ("why", "motivation", "interest")) or any(token in text for token in ("为什么", "动机", "意向")):
-        return "motivation"
-    if any(token in lowered for token in ("case", "design", "dashboard", "metric", "strategy")) or any(token in text for token in ("设计", "分析", "增长", "指标", "方案")):
-        return "case"
-    if any(token in lowered for token in ("sql", "python", "algorithm", "architecture", "technical")) or any(token in text for token in ("算法", "系统", "技术", "代码")):
-        return "technical"
-    if company or role:
-        return "behavioral"
-    return "behavioral"
-
-
-def _infer_question_difficulty(text: str) -> int:
-    lowered = str(text or "").lower()
-    score = 3
-    if any(token in lowered for token in ("system", "architecture", "strategy", "case")) or any(token in text for token in ("系统", "架构", "策略", "设计")):
-        score += 1
-    if any(token in lowered for token in ("deep", "hard", "complex")) or any(token in text for token in ("复杂", "深入", "追问")):
-        score += 1
-    return max(1, min(5, score))
 
 
 def _normalize_interview_round_type(value: Any) -> str:
@@ -3965,189 +3847,6 @@ async def _prepare_generate_resume_action(
 
     return execute
 
-
-async def _prepare_optimize_resume_action(
-    session: AsyncSession,
-    actor: ActorContext,
-    proposal: Any,
-    payload: Mapping[str, Any],
-    spec: Any,
-    input_payload: Mapping[str, Any],
-) -> Any:
-    resume_spec = get_model_spec("resume")
-    job_spec = get_model_spec("job")
-    section_spec = get_model_spec("resume_section")
-    resume = await fetch_scoped_record(session, actor, resume_spec, models.Resume, input_payload.get("resume_id"))
-    job = await fetch_scoped_record(session, actor, job_spec, models.Job, input_payload.get("job_id"))
-    instructions = _normalize_resume_text(input_payload.get("instructions"), max_length=1000)
-
-    async def execute() -> dict[str, Any]:
-        await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
-        current_summary = str(getattr(resume, "summary", "") or "").strip()
-        job_context = str(getattr(job, "summary", "") or getattr(job, "raw_description", "") or "").strip()
-        resume.title = f"{job.company} - {job.title} optimized resume"[:300]
-        resume.summary = _join_sentences(
-            current_summary,
-            f"Tailored for {job.company} {job.title}.",
-            instructions,
-            job_context[:240],
-        )[:4000]
-        resume.source_mode = "operator_optimize_resume"
-        resume.source_job_ids = _merge_id_list(getattr(resume, "source_job_ids", None), int(job.id))
-        snapshot = dict(resume.source_profile_snapshot) if isinstance(resume.source_profile_snapshot, Mapping) else {}
-        snapshot["operator_optimize_resume"] = {
-            "job_id": int(job.id),
-            "instructions": instructions,
-            "generator": "deterministic_operator_resume_v1",
-        }
-        resume.source_profile_snapshot = json_safe(snapshot)
-        sections = await _resume_sections(session, resume.id)
-        tailored_item = _resume_content_item(
-            "Tailored for role",
-            _join_sentences(f"{job.company} {job.title}", instructions, job_context[:220]),
-        )
-        tailored_section = next((section for section in sections if _is_tailored_resume_section(section)), None)
-        if tailored_section is None:
-            tailored_section = models.ResumeSection(
-                owner_actor_id=actor.actor_id,
-                resume_id=resume.id,
-                section_type=DEFAULT_RESUME_PERSONAL_SECTION_TYPE,
-                sort_order=_next_resume_section_sort_order(sections),
-                title="Tailored Highlights",
-                visible=True,
-                content_json=[tailored_item],
-            )
-            session.add(tailored_section)
-            await session.flush()
-        else:
-            tailored_section.title = tailored_section.title or "Tailored Highlights"
-            tailored_section.content_json = _append_resume_content(tailored_section.content_json, tailored_item)
-        await session.flush()
-        await session.refresh(resume)
-        sections = await _resume_sections(session, resume.id)
-        return _resume_mutation_result(
-            action="optimize_resume",
-            resume=resume,
-            sections=sections,
-            resume_spec=resume_spec,
-            section_spec=section_spec,
-            summary=f"Optimized resume {resume.id} for {job.company} {job.title}.",
-        )
-
-    return execute
-
-
-async def _prepare_batch_optimize_resume_action(
-    session: AsyncSession,
-    actor: ActorContext,
-    proposal: Any,
-    payload: Mapping[str, Any],
-    spec: Any,
-    input_payload: Mapping[str, Any],
-) -> Any:
-    resume_spec = get_model_spec("resume")
-    job_spec = get_model_spec("job")
-    section_spec = get_model_spec("resume_section")
-    source_resume = await fetch_scoped_record(session, actor, resume_spec, models.Resume, input_payload.get("resume_id"))
-    raw_job_ids = input_payload.get("job_ids")
-    if not isinstance(raw_job_ids, list) or not raw_job_ids:
-        raise OperatorError("validation_error", "batch_optimize_resume requires at least one job id.", {})
-    job_ids = _canonical_int_ids(raw_job_ids, field_name="job_ids")
-    jobs = [await fetch_scoped_record(session, actor, job_spec, models.Job, job_id) for job_id in job_ids]
-
-    async def execute() -> dict[str, Any]:
-        await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
-        source_sections = await _resume_sections(session, source_resume.id)
-        created: list[Any] = []
-        created_sections_count = 0
-        for job in jobs:
-            clone = models.Resume(
-                owner_actor_id=actor.actor_id,
-                user_name=source_resume.user_name,
-                title=f"{job.company} - {job.title} batch optimized resume"[:300],
-                photo_url=source_resume.photo_url,
-                summary=_join_sentences(
-                    source_resume.summary,
-                    f"Batch optimized for {job.company} {job.title}.",
-                    str(job.summary or job.raw_description or "")[:240],
-                )[:4000],
-                contact_json=json_safe(source_resume.contact_json if isinstance(source_resume.contact_json, Mapping) else {}),
-                template_id=source_resume.template_id,
-                style_config=json_safe(source_resume.style_config if isinstance(source_resume.style_config, Mapping) else {}),
-                is_primary=False,
-                language=source_resume.language,
-                source_mode="operator_batch_optimize_resume",
-                source_job_ids=[int(job.id)],
-                source_profile_snapshot=json_safe(
-                    {
-                        "source_resume_id": int(source_resume.id),
-                        "job_id": int(job.id),
-                        "generator": "deterministic_operator_resume_v1",
-                    }
-                ),
-            )
-            session.add(clone)
-            await session.flush()
-            if source_sections:
-                for index, section in enumerate(source_sections):
-                    session.add(
-                        models.ResumeSection(
-                            owner_actor_id=actor.actor_id,
-                            resume_id=clone.id,
-                            section_type=_resume_editor_section_type_from_resume_section(section),
-                            sort_order=section.sort_order if section.sort_order is not None else index,
-                            title=section.title or "Tailored Section",
-                            visible=bool(section.visible),
-                            content_json=_append_resume_content(
-                                section.content_json,
-                                _resume_content_item("Batch tailoring", f"Aligned with {job.company} {job.title}."),
-                            ),
-                        )
-                    )
-                    created_sections_count += 1
-            else:
-                session.add(
-                    models.ResumeSection(
-                        owner_actor_id=actor.actor_id,
-                        resume_id=clone.id,
-                        section_type=DEFAULT_RESUME_PERSONAL_SECTION_TYPE,
-                        sort_order=0,
-                        title="Batch Tailoring",
-                        visible=True,
-                        content_json=[_resume_content_item("Batch tailoring", f"Aligned with {job.company} {job.title}.")],
-                    )
-                )
-                created_sections_count += 1
-            created.append(clone)
-        await session.flush()
-        records: list[dict[str, Any]] = []
-        for resume in created:
-            await session.refresh(resume)
-            records.append(
-                serialize_record(
-                    resume,
-                    resume_spec,
-                    resume_spec.detail_fields,
-                    include_long_text=True,
-                    truncate_long_text=False,
-                )
-            )
-        task_id = f"resume_batch_{proposal.proposal_id[-12:]}"
-        return {
-            "status": "completed",
-            "tool_name": "invoke_action",
-            "action": "batch_optimize_resume",
-            "model": "resume",
-            "resume_id": str(source_resume.id),
-            "created_count": len(records),
-            "resumes": records,
-            "sections_count": created_sections_count,
-            "task_id": task_id,
-            "task_payload": {"resume_id": str(source_resume.id), "job_ids": [str(job.id) for job in jobs]},
-            "summary": f"Created {len(records)} batch optimized resume(s).",
-        }
-
-    return execute
 
 
 async def _prepare_apply_resume_ai_patch_action(
@@ -6227,25 +5926,50 @@ def _build_personal_archive_sections(profile: Any) -> list[Any] | None:
     return build_personal_archive_sections(profile)
 
 
-def _deterministic_cover_letter(job: Any, application: Any, tone: str) -> str:
-    company = str(getattr(job, "company", "") or "your team").strip()
-    title = str(getattr(job, "title", "") or "this role").strip()
-    location = str(getattr(job, "location", "") or "").strip()
-    summary = str(getattr(job, "summary", "") or getattr(job, "raw_description", "") or "").strip()
-    notes = str(getattr(application, "notes", "") or "").strip()
-    detail = summary[:260] if summary else "the role's priorities and responsibilities"
-    context = f" in {location}" if location else ""
-    note_sentence = f" I also want to highlight this context: {notes[:180]}." if notes else ""
-    return (
-        f"Dear {company} hiring team,\n\n"
-        f"I am excited to apply for the {title}{context}. "
-        f"My background and working style align with {detail}."
-        f"{note_sentence}\n\n"
-        f"I would welcome the chance to discuss how I can contribute to {company}. "
-        f"Thank you for considering my application.\n\n"
-        f"Sincerely,\nOfferU Candidate\n\n"
-        f"Tone: {tone}"
+async def _cover_letter_resume_text(session: AsyncSession, actor: ActorContext) -> str:
+    """加载当前 actor 的简历文本作为求职信素材（主简历优先，否则最近更新）。"""
+    result = await session.execute(
+        select(models.Resume)
+        .where(models.Resume.owner_actor_id == actor.actor_id)
+        .order_by(models.Resume.is_primary.desc(), models.Resume.updated_at.desc())
+        .limit(1)
     )
+    resume = result.scalar_one_or_none()
+    if resume is None:
+        return ""
+    parts = [str(resume.user_name or ""), str(resume.summary or "")]
+    for section in await _resume_sections(session, resume.id):
+        parts.append(f"\n{section.title or section.section_type}:")
+        content = section.content_json
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, Mapping):
+                    label = item.get("subtitle") or item.get("title") or item.get("company") or item.get("school") or ""
+                    desc = item.get("description") or ""
+                    line = " ".join(part for part in (str(label), str(desc)) if part.strip())
+                    if line.strip():
+                        parts.append(f"  - {line}")
+                elif isinstance(item, str) and item.strip():
+                    parts.append(f"  - {item}")
+    return "\n".join(parts)
+
+
+async def _generate_cover_letter_llm(
+    session: AsyncSession,
+    actor: ActorContext,
+    job: Any,
+    tone: str,
+) -> str:
+    """通过 services.cover_letter 调真实 LLM 生成求职信。"""
+    from app.services.cover_letter import generate_cover_letter as _gen
+
+    jd = str(getattr(job, "raw_description", "") or getattr(job, "summary", "") or "").strip()
+    resume_text = await _cover_letter_resume_text(session, actor)
+    result = await _gen(jd=jd, resume=resume_text)
+    if not isinstance(result, Mapping):
+        return ""
+    text = str(result.get("cover_letter") or "").strip()
+    return text
 
 
 def _normalize_triage_status(value: Any) -> str:
@@ -6987,9 +6711,6 @@ async def _record_intermediate_confirmation(session: AsyncSession, actor: ActorC
     return existing_event_id
 
 
-async def _record_first_confirmation(session: AsyncSession, actor: ActorContext, proposal: Any) -> str:
-    """Legacy alias for backward compatibility."""
-    return await _record_intermediate_confirmation(session, actor, proposal)
 
 
 async def _mark_terminal(
@@ -8027,17 +7748,103 @@ async def _validate_action_expected_versions(
             for key in set(current_normalized) | set(stored_expected)
             if current_normalized.get(key) != stored_expected.get(key)
         )
-        raise OperatorError(
-            "conflict_error",
-            "Underlying action reference changed after proposal creation.",
-            {
-                "proposal_id": proposal.proposal_id,
-                "action": spec.action,
-                "changed_references": changed,
-                "expected_versions": stored_expected,
-                "current_versions": current_normalized,
-            },
-        )
+        external = await _external_expected_version_drift(session, actor, proposal, stored_expected, current_normalized, changed)
+        if external:
+            raise OperatorError(
+                "conflict_error",
+                "Underlying action reference changed after proposal creation.",
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "action": spec.action,
+                    "changed_references": external,
+                    "expected_versions": stored_expected,
+                    "current_versions": current_normalized,
+                },
+            )
+
+
+async def _external_expected_version_drift(
+    session: AsyncSession,
+    actor: ActorContext,
+    proposal: Any,
+    stored_expected: Mapping[str, str],
+    current_normalized: Mapping[str, str],
+    changed: Sequence[str],
+) -> list[str]:
+    """Return the divergent references NOT attributable to this Plan's own commits.
+
+    ``expected_versions`` is an optimistic-concurrency fence: it must reject a
+    reference whose record was mutated by anything outside the sealed proposal.
+    But when one confirmation group of a Plan commits, its effects bump record
+    versions that a LATER group of the SAME Plan sealed at stage time. That
+    self-progression is the plan's own committed intent, not an external edit.
+
+    A divergent ``model:record_id`` is same-plan self-progression iff its
+    current version is reachable from its sealed version purely by following
+    ``before_version -> after_version`` edges of committed NodeExecutionOutcome
+    effect manifests in the same plan/actor/session. If any external writer
+    touched the record, the current version diverges from every same-plan
+    ``after_version`` and the reference stays in the conflict set.
+
+    Returns the subset of ``changed`` keys that remain unexplained by same-plan
+    committed transitions (i.e. genuinely external). An empty list means every
+    divergence is the plan's own and the fence is rebased, not tripped.
+    """
+    plan_id = str(getattr(proposal, "plan_id", "") or "")
+    if not plan_id:
+        return list(changed)
+    outcomes = list(
+        (
+            await session.execute(
+                select(models.NodeExecutionOutcome.effect_manifest_json).where(
+                    models.NodeExecutionOutcome.plan_id == plan_id,
+                    models.NodeExecutionOutcome.actor_id == str(actor.actor_id),
+                    models.NodeExecutionOutcome.session_id == str(actor.session_id),
+                    models.NodeExecutionOutcome.effect_state == "committed",
+                )
+            )
+        ).scalars().all()
+    )
+    # (model, record_id) -> {before_version: {after_version, ...}}
+    transitions: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for manifest in outcomes:
+        effects = manifest.get("effects") if isinstance(manifest, Mapping) else None
+        if not isinstance(effects, list):
+            continue
+        for effect in effects:
+            if not isinstance(effect, Mapping) or str(effect.get("kind") or "") != "database_record":
+                continue
+            model = str(effect.get("model") or "")
+            record_id = str(effect.get("record_id") or "")
+            before = str(effect.get("before_version") or "")
+            after = str(effect.get("after_version") or "")
+            if not model or not record_id or not after:
+                continue
+            transitions.setdefault((model, record_id), {}).setdefault(before, set()).add(after)
+    if not transitions:
+        return list(changed)
+
+    def _is_self_progression(reference: str) -> bool:
+        model, _, record_id = reference.partition(":")
+        edges = transitions.get((model, record_id))
+        if not edges:
+            return False
+        start = str(stored_expected.get(reference) or "")
+        target = str(current_normalized.get(reference) or "")
+        # BFS from the sealed version through same-plan before->after edges.
+        seen: set[str] = set()
+        frontier = [start]
+        while frontier:
+            version = frontier.pop()
+            if version == target:
+                return True
+            if version in seen:
+                continue
+            seen.add(version)
+            frontier.extend(edges.get(version, ()))
+        return False
+
+    return [reference for reference in changed if not _is_self_progression(reference)]
 
 
 def _validate_stored_risk(proposal: Any, computed_risk: int) -> None:
@@ -9024,6 +8831,7 @@ async def _prepare_remember_preference_action(
             confidence=1.0,
             skill="",
             sensitive_confirmed=False,
+            commit=False,
         )
         if result.get("needs_confirmation"):
             message = str((result.get("error") or {}).get("message") or "Sensitive memory requires explicit confirmation.")

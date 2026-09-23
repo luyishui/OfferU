@@ -338,8 +338,8 @@ async def generate_resume(
     """为指定岗位 AI 生成一份定制简历。
     会基于用户 Profile 中的经历 Bullet 自动召回匹配、组装简历。
     返回生成结果（含 resume_id、匹配率、缺失能力等）。"""
-    # 延迟导入避免循环
-    from app.routes.optimize import _generate_for_job
+    # 延迟导入避免循环；旧 routes.optimize._generate_for_job 已迁至 services
+    from app.services.resume_builder import generate_for_job
 
     async with async_session() as db:
         # 获取 profile
@@ -360,7 +360,7 @@ async def generate_resume(
         )).scalars().all()
 
         try:
-            result = await _generate_for_job(profile, job, list(secs), db)
+            result = await generate_for_job(profile, job, list(secs), db)
             return result
         except Exception as e:
             return {"error": str(e)}
@@ -513,7 +513,7 @@ async def create_application(job_id: int, notes: str = "") -> dict:
 @mcp.tool()
 async def generate_cover_letter(job_id: int, resume_id: int) -> dict:
     """为指定岗位和简历生成 AI 求职信。"""
-    from app.agents.cover_letter import generate_cover_letter as _gen
+    from app.services.cover_letter import generate_cover_letter as _gen
 
     async with async_session() as db:
         job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()

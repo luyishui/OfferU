@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db
 from app.models.models import InterviewNotification, CalendarEvent
-from app.agents.email_parser import parse_interview_email
+from app.services.email_parser import parse_interview_email
 
 router = APIRouter()
 
