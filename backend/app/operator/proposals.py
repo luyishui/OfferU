@@ -2955,6 +2955,13 @@ async def _prepare_ensure_application_for_job_action(
     async def execute() -> dict[str, Any]:
         await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
         application = await ensure_canonical_application_for_job(session, job=job)
+        from app.operator.effect_manifest import record_noop_effect
+
+        record_noop_effect(
+            model="application",
+            record_id=application.id,
+            reason="ensure_idempotent_hit",
+        )
         target_table = None
         if resolved_table_id is None:
             target_table = (

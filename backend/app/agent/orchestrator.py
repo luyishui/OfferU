@@ -879,8 +879,15 @@ async def run_agent_turn(
             return public_agent_response(response)
 
         # Compaction LLM work must not run while the final output transaction owns
-        # the session-lease row or a SQLite writer lock. Prepare against the exact
-        # prospective context; persist it later using actual durable entry IDs.
+        # the session-lease row or a SQLite writer lock. Commit the write
+        # transaction left open by the tool loop/finalization reads first — the
+        # same commit-before-provider-wait invariant used before streaming — then
+        # prepare against the exact prospective context; persist it later using
+        # actual durable entry IDs.
+        async with db_activity_lock:
+            if heartbeat is not None:
+                await heartbeat.extend_transaction(db)
+            await _commit_quietly(db)
         prospective_messages = [*tree.build_context().messages, *new_messages]
         prepared_compaction = await _prepare_compaction(
             prospective_messages,

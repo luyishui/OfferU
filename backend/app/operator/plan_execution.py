@@ -471,6 +471,10 @@ def canonicalize_node_execution_result(
     for effect in manifest.get("effects") or []:
         if isinstance(effect, Mapping) and str(effect.get("kind") or "") == "database_record":
             manifest_ids.setdefault(str(effect.get("model") or ""), set()).add(str(effect.get("record_id") or ""))
+    noop_ids: dict[str, set[str]] = {}
+    for observation in manifest.get("observations") or []:
+        if isinstance(observation, Mapping) and str(observation.get("kind") or "") == "no_op":
+            noop_ids.setdefault(str(observation.get("model") or ""), set()).add(str(observation.get("record_id") or ""))
     authorization = contract.get("authorization") if isinstance(contract.get("authorization"), Mapping) else {}
     immutable_record_scopes = authorization.get("record_scopes") if isinstance(authorization.get("record_scopes"), Mapping) else {}
     resolved_record_scopes = resolved_authorization.get("record_scopes") if isinstance(resolved_authorization.get("record_scopes"), Mapping) else {}
@@ -488,7 +492,11 @@ def canonicalize_node_execution_result(
         model_name = semantic_type[len("record_id<"):].split(">", 1)[0]
         values = value if semantic_type.endswith("[]") and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else [value]
         identities = {str(item) for item in values if item not in (None, "")}
-        allowed = set(manifest_ids.get(model_name, set())) | {str(item) for item in (record_scopes.get(model_name) or [])}
+        allowed = (
+            set(manifest_ids.get(model_name, set()))
+            | {str(item) for item in (record_scopes.get(model_name) or [])}
+            | set(noop_ids.get(model_name, set()))
+        )
         creates_model = any(
             isinstance(item, Mapping)
             and str(item.get("kind") or "database_record") == "database_record"
@@ -496,7 +504,12 @@ def canonicalize_node_execution_result(
             and str(item.get("model") or "") == model_name
             for item in effect_specs
         )
-        if creates_model and name in {"record_id", "primary_record_id"} and not identities <= set(manifest_ids.get(model_name, set())):
+        if (
+            creates_model
+            and name in {"record_id", "primary_record_id"}
+            and not identities <= set(noop_ids.get(model_name, set()))
+            and not identities <= set(manifest_ids.get(model_name, set()))
+        ):
             raise NodeExecutionError("integrity", f"typed output {name!r} is not bound to a created manifest identity")
         if allowed and not identities <= allowed:
             raise NodeExecutionError("integrity", f"typed output {name!r} is outside the confirmed/manifest identity set")
