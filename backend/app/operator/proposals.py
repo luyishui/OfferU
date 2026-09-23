@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 import hashlib
 import json
 import logging
@@ -299,15 +298,6 @@ async def _prepare_in_read_only_confirmation_transaction(
         guard.close()
 
 
-class ProposalStatus(str, enum.Enum):
-    PENDING = "pending"
-    AWAITING_NEXT_CONFIRMATION = "awaiting_next_confirmation"
-    CONFIRMED = "confirmed"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
-    CONFLICT = "conflict"
-
-
 RESUME_SECTION_TITLES = {
     "education": "教育经历",
     "experience": "实践经历",
@@ -324,26 +314,6 @@ RESUME_SECTION_TITLES = {
 }
 
 DEFAULT_RESUME_PERSONAL_SECTION_TYPE = "personalExperiences"
-
-SCRAPER_SOURCE_ALIASES = {
-    "boss": "boss",
-    "zhilian": "zhilian",
-    "linkedin": "linkedin",
-    "jobspy": "jobspy",
-    "shixiseng": "shixiseng",
-    "corporate": "corporate",
-}
-
-EMAIL_CATEGORY_TO_EVENT_TYPE = {
-    "application": "application",
-    "written_test": "written_test",
-    "assessment": "assessment",
-    "interview_1": "interview",
-    "interview_2": "interview",
-    "interview_hr": "interview",
-    "offer": "offer",
-    "rejection": "rejection",
-}
 
 
 async def _record_plan_group_confirmation(session: AsyncSession, actor: ActorContext, proposal: models.ProposalCache, event_id: str) -> None:
@@ -1449,7 +1419,6 @@ async def confirm_proposal(
         if proposal.confirmations_received >= 2:
             proposal.second_confirmed_at = now
         await _remove_pending_proposal_id(session, actor, proposal.proposal_id)
-        await _resolve_harness_pending_proposal(session, actor, proposal.proposal_id, status="confirmed")
         # Phase 5: record confirmed intent scope for batch_mutate
         from app.operator.guards import ConfirmedIntentScope, record_confirmed_scope
         locked = proposal.locked_payload or {}
@@ -1494,7 +1463,6 @@ async def confirm_proposal(
         proposal_id_value = str(proposal.proposal_id)
         plan_id_value = str(getattr(proposal, "plan_id", "") or "")
         confirmed_event_id = str(confirmed_event.get("event_id") or "")
-        continuation_payload = json_safe(_proposal_execution_payload(proposal, confirmed_execution_result))
         await _record_plan_group_confirmation(session, actor, proposal, confirmed_event_id)
         from app.operator.plan_runtime import record_confirmed_projection_execution
         await record_confirmed_projection_execution(session, actor, proposal, confirmed_execution_result)
@@ -1523,7 +1491,7 @@ async def confirm_proposal(
         await _rollback_quietly(session)
         raise
     except OperatorError as exc:
-        await _rollback_if_needed(session, exc)
+        await _rollback_quietly(session)
         return _operator_error_response(exc)
     except Exception as exc:  # pragma: no cover - defensive route/repository boundary.
         await _rollback_quietly(session)
@@ -1649,130 +1617,13 @@ async def reject_proposal(
         }
         return response
     except OperatorError as exc:
-        await _rollback_if_needed(session, exc)
+        await _rollback_quietly(session)
         return _operator_error_response(exc)
     except Exception as exc:  # pragma: no cover - defensive route/repository boundary.
         await _rollback_quietly(session)
         return transient_error("Proposal rejection failed transiently.", {"error": str(exc)})
 
 
-async def expire_proposal(
-    session: AsyncSession,
-    actor: ActorContext,
-    proposal_id: str,
-    reason: str = "",
-) -> dict[str, Any]:
-    try:
-        proposal = await _load_proposal_authoritative(session, proposal_id)
-        if proposal is None:
-            raise OperatorError("not_found_error", "Proposal was not found.", {"proposal_id": proposal_id})
-        if proposal.actor_id != actor.actor_id or proposal.session_id != actor.session_id:
-            await _audit_decision(
-                session,
-                actor,
-                proposal,
-                confirmation_status="expire_rejected",
-                result_status="permission_error",
-                error="Proposal is outside the current actor/session scope.",
-            )
-            await session.commit()
-            raise OperatorError(
-                "permission_error",
-                "Proposal is outside the current actor/session scope.",
-                {"proposal_id": proposal_id},
-            )
-        if proposal.status == "confirmed":
-            await _validated_stored_confirm_response(session, actor, proposal)
-            await _audit_decision(
-                session,
-                actor,
-                proposal,
-                confirmation_status="expire_rejected",
-                result_status="conflict_error",
-                error="Confirmed proposals cannot be expired.",
-            )
-            await session.commit()
-            raise OperatorError(
-                "conflict_error",
-                "Confirmed proposals cannot be expired.",
-                {"proposal_id": proposal_id, "status": proposal.status},
-            )
-        if proposal.status == "expired":
-            return {
-                "ok": True,
-                "status": "expired",
-                "proposal_id": proposal.proposal_id,
-                "result": {"status": "expired", "summary": proposal.summary},
-            }
-        if proposal.status == "rejected":
-            await _audit_decision(
-                session,
-                actor,
-                proposal,
-                confirmation_status="expire_rejected",
-                result_status="conflict_error",
-                error="Rejected proposals cannot be expired.",
-            )
-            await session.commit()
-            raise OperatorError(
-                "conflict_error",
-                "Rejected proposals cannot be expired.",
-                {"proposal_id": proposal_id, "status": proposal.status},
-            )
-        expired_event_id = await _mark_terminal(session, actor, proposal, "expired", reason=reason)
-        if not expired_event_id:
-            await _audit_decision(
-                session,
-                actor,
-                await _load_proposal_authoritative(session, proposal_id),
-                confirmation_status="expire_rejected",
-                result_status="conflict_error",
-                error="Proposal was already transitioned by another decision.",
-            )
-            await session.commit()
-            raise OperatorError(
-                "conflict_error",
-                "Proposal was already transitioned by another decision.",
-                {"proposal_id": proposal_id},
-            )
-        if str(getattr(proposal, "plan_id", "") or ""):
-            from app.operator.plan_runtime import expire_plan_group_projection
-            await expire_plan_group_projection(session, actor, proposal)
-        await _audit_decision(
-            session,
-            actor,
-            proposal,
-            confirmation_status="expired",
-            result_status="expired",
-            result_summary=reason or "Proposal expired.",
-            confirmation_event_id=expired_event_id,
-        )
-        await session.commit()
-        return {
-            "ok": True,
-            "status": "expired",
-            "proposal_id": proposal.proposal_id,
-            "result": {"status": "expired", "summary": proposal.summary},
-        }
-    except OperatorError as exc:
-        await _rollback_if_needed(session, exc)
-        return _operator_error_response(exc)
-    except Exception as exc:  # pragma: no cover - defensive route/repository boundary.
-        await _rollback_quietly(session)
-        return transient_error("Proposal expiry failed transiently.", {"error": str(exc)})
-
-
-async def _load_bound_proposal(session: AsyncSession, actor: ActorContext, proposal_id: str) -> Any:
-    proposal = await session.get(models.ProposalCache, proposal_id)
-    if proposal is None:
-        raise OperatorError("not_found_error", "Proposal was not found.", {"proposal_id": proposal_id})
-    if proposal.actor_id != actor.actor_id or proposal.session_id != actor.session_id:
-        raise OperatorError(
-            "permission_error",
-            "Proposal is outside the current actor/session scope.",
-            {"proposal_id": proposal_id},
-        )
-    return proposal
 
 
 async def _load_proposal_authoritative(session: AsyncSession, proposal_id: str) -> Any | None:
@@ -2385,16 +2236,6 @@ async def _dispatch_apply_resume_template(
     cleaned: Mapping[str, Any],
 ) -> Any:
     return await _prepare_apply_resume_template_action(session, actor, cleaned)
-
-
-def _smartfill_visibility(result_key: str) -> dict[str, str]:
-    return {"result": result_key, "scope": "operator", "visibility": "backend"}
-
-
-def _smartfill_archive_from_profile(profile_payload: Mapping[str, Any] | None) -> dict[str, Any]:
-    if isinstance(profile_payload, Mapping) and profile_payload:
-        return json_safe(profile_payload)
-    return {}
 
 
 async def _smartfill_profile_payload(
@@ -6736,7 +6577,6 @@ async def _mark_terminal(
     events.append(event)
     proposal.confirmation_events = events
     await _remove_pending_proposal_id(session, actor, proposal.proposal_id)
-    await _resolve_harness_pending_proposal(session, actor, proposal.proposal_id, status=status)
     return str(event.get("event_id") or "")
 
 
@@ -6744,24 +6584,6 @@ async def _remove_pending_proposal_id(session: AsyncSession, actor: ActorContext
     from app.operator.guards import remove_pending_proposal_id
 
     await remove_pending_proposal_id(session, actor, proposal_id)
-
-
-async def _current_session_pending_proposal_ids(session: AsyncSession, actor: ActorContext) -> set[str]:
-    agent_session = await session.get(models.AgentSession, actor.session_id, populate_existing=True)
-    if agent_session is None or agent_session.actor_id != actor.actor_id:
-        return set()
-    await session.refresh(agent_session)
-    return {str(item) for item in (agent_session.pending_proposal_ids or []) if str(item or "").strip()}
-
-
-async def _resolve_harness_pending_proposal(
-    session: AsyncSession,
-    actor: ActorContext,
-    proposal_id: str,
-    *,
-    status: str,
-) -> None:
-    return None
 
 
 def _proposal_execution_payload(proposal: Any, result: Mapping[str, Any]) -> dict[str, Any]:
@@ -7167,49 +6989,6 @@ async def _continue_new_agent_after_confirmation(
         }
 
 
-def _goal_proposal_payload(proposal: Any | None) -> dict[str, Any]:
-    if proposal is None:
-        return {}
-    locked_payload = getattr(proposal, "locked_payload", None)
-    payload = dict(locked_payload) if isinstance(locked_payload, Mapping) else {}
-    payload.setdefault("tool_name", str(getattr(proposal, "tool_name", "") or ""))
-    payload.setdefault("model_or_action", str(getattr(proposal, "model_or_action", "") or ""))
-    if getattr(proposal, "record_id", None):
-        payload.setdefault("record_id", str(getattr(proposal, "record_id") or ""))
-    return json_safe(payload)
-
-
-async def _queue_harness_pending_proposals_from_result(
-    session: AsyncSession,
-    actor: ActorContext,
-    result: Mapping[str, Any],
-    *,
-    exclude_proposal_ids: set[str] | None = None,
-) -> list[dict[str, Any]]:
-    return []
-
-
-def _result_proposals(result: Mapping[str, Any]) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    proposal = result.get("proposal")
-    if isinstance(proposal, Mapping):
-        output.append(dict(proposal))
-    proposals = result.get("proposals")
-    if isinstance(proposals, list):
-        for item in proposals:
-            if isinstance(item, Mapping):
-                output.append(dict(item))
-    return output
-
-
-async def _run_confirmed_proposal_refine(
-    session: AsyncSession,
-    actor: ActorContext,
-    proposal: Any,
-    result: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    return None
-
 
 async def _is_current_session_pending_proposal(session: AsyncSession, actor: ActorContext, proposal_id: str) -> bool:
     agent_session = await session.get(models.AgentSession, actor.session_id, populate_existing=True)
@@ -7364,20 +7143,6 @@ def _slugify(value: str) -> str:
     return slug.strip("-") or "logo"
 
 
-def _merge_id_list(existing: Any, value: int) -> list[int]:
-    ids: list[int] = []
-    for item in existing or []:
-        try:
-            item_int = int(item)
-        except (TypeError, ValueError):
-            continue
-        if item_int not in ids:
-            ids.append(item_int)
-    if value not in ids:
-        ids.append(value)
-    return ids
-
-
 def _resume_content_item(title: str, description: str) -> dict[str, Any]:
     normalized_title = str(title or "").strip()
     return {
@@ -7401,11 +7166,6 @@ async def _resume_sections(session: AsyncSession, resume_id: Any) -> list[Any]:
             .order_by(models.ResumeSection.sort_order.asc(), models.ResumeSection.id.asc())
         )
     ).scalars().all()
-
-
-def _is_tailored_resume_section(section: Any) -> bool:
-    section_type = str(getattr(section, "section_type", "") or "").strip().lower()
-    return section_type in {"custom", "personalexperiences", "personal_experiences", "personal_experience"}
 
 
 EDITOR_RESUME_SECTION_TYPES = {
@@ -7459,14 +7219,6 @@ def _resume_editor_section_type_value(
     return LEGACY_RESUME_SECTION_TYPE_MAP.get(normalized, DEFAULT_RESUME_PERSONAL_SECTION_TYPE)
 
 
-def _resume_section_has_internship_hint(section: Any) -> bool:
-    return _resume_section_value_has_internship_hint(
-        getattr(section, "section_type", ""),
-        title=getattr(section, "title", ""),
-        content_json=getattr(section, "content_json", None),
-    )
-
-
 def _resume_section_value_has_internship_hint(section_type: Any, *, title: Any = "", content_json: Any = None) -> bool:
     try:
         content_text = json.dumps(content_json or "", ensure_ascii=False)
@@ -7480,16 +7232,6 @@ def _resume_section_value_has_internship_hint(section_type: Any, *, title: Any =
         ]
     ).lower()
     return "实习" in hint or "intern" in hint
-
-
-def _next_resume_section_sort_order(sections: list[Any]) -> int:
-    sort_orders: list[int] = []
-    for section in sections:
-        try:
-            sort_orders.append(int(getattr(section, "sort_order", 0) or 0))
-        except (TypeError, ValueError):
-            continue
-    return (max(sort_orders) + 10) if sort_orders else 0
 
 
 async def _fetch_resume_section(session: AsyncSession, actor: ActorContext, resume_id: Any, section_id: Any) -> Any:
@@ -8325,7 +8067,6 @@ async def _quarantine_corrupt_confirmed_proposal(
     proposal.confirmation_events = [*_events(proposal), conflict_event]
     flag_modified(proposal, "confirmation_events")
     await _remove_pending_proposal_id(session, actor, str(proposal.proposal_id))
-    await _resolve_harness_pending_proposal(session, actor, str(proposal.proposal_id), status="conflict")
     # Same transaction: revoke any queued/running continuation so a worker that
     # already claimed cannot keep driving agent work on a quarantined confirm.
     confirmed_events = [
@@ -8757,10 +8498,6 @@ def _unsafe_decision_snapshot(body: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(body, Mapping):
         return {}
     return {str(key): json_safe(value) for key, value in body.items()}
-
-
-async def _rollback_if_needed(session: AsyncSession, exc: OperatorError) -> None:
-    await _rollback_quietly(session)
 
 
 async def _rollback_quietly(session: AsyncSession) -> None:
