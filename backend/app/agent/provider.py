@@ -136,6 +136,7 @@ def _make_partial_message(
     stop_reason: Optional[str] = None,
     usage: Optional[Usage] = None,
     error_message: Optional[str] = None,
+    include_incomplete: bool = True,
 ) -> AssistantMessage:
     content = []
     if thinking:
@@ -143,6 +144,12 @@ def _make_partial_message(
     if text:
         content.append(TextContent(text=text))
     for call in tool_calls:
+        # Empty-name slots come from index-bearing deltas that never carried a
+        # function.name (e.g. swe-2). They are raw stream progress, so delta
+        # messages keep them; terminal messages must not surface them as
+        # executable ToolCallContent ("Tool not found" phantom calls).
+        if not include_incomplete and not (call.get("name") or "").strip():
+            continue
         content.append(
             ToolCallContent(
                 id=call.get("id") or f"call_{len(content) + 1}",
@@ -323,6 +330,7 @@ class LlmStreamProvider:
             stop_reason=stop_reason,
             usage=usage,
             error_message=error_message,
+            include_incomplete=False,
         )
         if error_message is not None:
             yield StreamEvent(type="error", message=final, delta={"error": error_message})
@@ -393,6 +401,7 @@ class ScriptedStreamProvider(LlmStreamProvider):
                     tool_calls,
                     stop_reason="aborted",
                     usage=Usage(estimated=True),
+                    include_incomplete=False,
                 )
                 yield StreamEvent(type="done", message=final)
                 return
@@ -443,6 +452,7 @@ class ScriptedStreamProvider(LlmStreamProvider):
                 tool_calls,
                 stop_reason=stop_reason,
                 usage=usage,
+                include_incomplete=False,
             ),
         )
 

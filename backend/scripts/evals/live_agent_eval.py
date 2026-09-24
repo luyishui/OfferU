@@ -95,8 +95,14 @@ CONFIRMATION_QUESTION_MARKERS = (
     "proceed",
     "approve",
 )
-CONFIRMATION_QUESTION_ENDINGS = ("？", "?", "吗", "呢", "么", "吧")
 READ_ONLY_TOOL_NAMES = frozenset({"query_records", "get_record", "describe_capability"})
+# Tools whose execution never produces a business artifact or proposal and so
+# must not count as turn progress for the confirm-injection gate:
+# manage_session only performs session/skill bookkeeping (activate skill,
+# set step, patch session state). It is NOT added to READ_ONLY_TOOL_NAMES
+# because it does mutate session state — _turn_has_tool_execution(
+# side_effecting_only=True) correctly still counts it as side-effecting.
+NON_PROGRESS_TOOL_NAMES = READ_ONLY_TOOL_NAMES | {"manage_session"}
 
 
 def classify_provider_failure(
@@ -233,21 +239,24 @@ def _turn_has_progress(events: list[Mapping[str, Any]], turn_index: int) -> bool
         if event_name == "tool_execution_start":
             data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
             tool_name = str(data.get("tool_name") or data.get("toolName") or "")
-            if tool_name not in READ_ONLY_TOOL_NAMES:
+            if tool_name not in NON_PROGRESS_TOOL_NAMES:
                 return True
     return False
 
 
 def _is_confirmation_question(text: str) -> bool:
-    """True when the assistant text clearly stops at a confirmation-style
-    question: it contains a question marker and ends with a questioning
-    suffix (both Chinese and English patterns)."""
+    """True when the assistant text stops to consult the user instead of
+    executing: it contains a confirmation-seeking marker. The marker is the
+    signal — callers already gate on ``_turn_has_progress`` (no business
+    write/proposal), so a marker here means the model ended the turn waiting
+    on the user, whether as a question, a conditional ("确认后我就…"), or an
+    open invitation ("告诉我要不要调整…"). Matching only question suffixes or
+    a fixed list of declarative tails missed the open-invitation form."""
     stripped = str(text or "").strip()
     if len(stripped) < 4:
         return False
     lowered = stripped.lower()
-    has_marker = any(marker in lowered for marker in CONFIRMATION_QUESTION_MARKERS)
-    return has_marker and stripped.endswith(CONFIRMATION_QUESTION_ENDINGS)
+    return any(marker in lowered for marker in CONFIRMATION_QUESTION_MARKERS)
 
 
 @dataclass

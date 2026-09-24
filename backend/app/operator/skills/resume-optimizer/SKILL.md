@@ -7,8 +7,8 @@ Prepare or optimize a resume using verified profile facts and the selected job d
 1. Activate this Skill before collecting evidence.
 2. Read the target Job, Profile, and relevant ProfileSection records with Operator tools.
 3. Record user exclusions and unsupported-claim boundaries in the current session.
-4. Explain the tailoring strategy and obtain the strategy confirmation required by the runtime.
-5. Use `generate_resume` only after readiness evidence is durable and complete.
+4. Stage `generate_resume` via `invoke_action` once evidence is durable — the resulting proposal card IS the strategy confirmation the runtime requires; do not wait for a free-text user reply first.
+5. Confirm that proposal (or its plan group) to apply the write.
 6. Treat generated content as a proposal; never claim a write before the confirmation and result receipt succeed.
 
 ## Safety boundaries

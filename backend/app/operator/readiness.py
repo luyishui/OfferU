@@ -55,9 +55,10 @@ PUBLIC_READINESS_ACQUISITION: dict[str, list[dict[str, Any]]] = {
     ],
     "strategy_confirmed": [
         {
-            "tool": "confirmation",
-            "operation": "strategy_confirmation",
-            "detail": "Requires an explicit durable user decision through the authenticated confirmation UI. A free-form current_step value never satisfies this gate.",
+            "tool": "invoke_action",
+            "action": "generate_resume",
+            "operation": "invoke",
+            "detail": "Stage generate_resume via invoke_action once evidence is durable: the staged proposal's confirmation card IS the durable strategy-confirmation surface. Do not wait for a free-text user reply or a set_skill_step value — confirming that proposal satisfies this gate.",
         },
     ],
     "profile_read_evidence": [

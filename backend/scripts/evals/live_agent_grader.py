@@ -1702,7 +1702,11 @@ def _grade_job_application_resume_bundle(case: LiveAgentCase, seed_ids: Mapping[
         and not _job_pool_or_triage_changed(before, after, "ChainLabs", "Product Manager")
         and _find_job(after, "OldCorp", "Product Manager").get("triage_status") == "ignored"
     )
-    trajectory_ok = _read_models_cover(tool_calls, {"job", "pool"}) and (_has_read_tool(tool_calls, "profile") or _has_read_tool(tool_calls, "profile_section")) and (_has_read_tool(tool_calls, "resume") or _has_read_tool(tool_calls, "resume_section")) and (_has_read_tool(tool_calls, "application_record") or _has_write_tool(tool_calls, "patch_record", model_or_action="application_record") or _has_write_tool(tool_calls, "invoke_action", model_or_action="create_application_records_from_jobs"))
+    application_action_used = any(
+        _has_write_tool(tool_calls, "invoke_action", model_or_action=name)
+        for name in _application_domain_action_names()
+    )
+    trajectory_ok = _read_models_cover(tool_calls, {"job"}) and (_has_read_tool(tool_calls, "pool") or _has_read_tool(tool_calls, "application_table") or _has_read_tool(tool_calls, "application_record") or application_action_used) and (_has_read_tool(tool_calls, "profile") or _has_read_tool(tool_calls, "profile_section")) and (_has_read_tool(tool_calls, "resume") or _has_read_tool(tool_calls, "resume_section") or _has_write_tool(tool_calls, "invoke_action", model_or_action="generate_resume"))
     response_ok = _is_chinese(final_text) and (_contains(final_text, "Acme") or _contains(final_text, "简历"))
     any_confirm_failure = _any_confirm_failure(events, confirmed_proposals)
     production_confirm_failure = _production_confirm_failure(events, confirmed_proposals)
