@@ -112,12 +112,39 @@ export function AgentStreamMessageBubble({
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
+  const isToolResult = message.role === "toolResult";
   const rawObj = (message.raw && typeof message.raw === "object" ? message.raw : {}) as Record<string, unknown>;
   const rawError = String(rawObj.error_message || rawObj.error || "").trim();
   const isErrorStop = rawObj.stop_reason === "error" || Boolean(rawError);
   const isBlank = !message.text?.trim();
+  const hasToolCalls = Boolean(message.toolCalls && Object.keys(message.toolCalls).length > 0);
 
-  if (isAssistant && (isErrorStop || isBlank)) {
+  if (isToolResult) {
+    const toolName = String(rawObj.tool_name || "").trim() || "工具";
+    const isToolError = Boolean(rawObj.is_error);
+    return (
+      <div className="flex justify-start">
+        <div className={`${compact ? "max-w-[92%]" : "max-w-[92%] md:max-w-[84%]"} text-left`}>
+          <details className="border border-black/20 bg-[var(--surface-muted)] px-3 py-2 text-xs text-black/70">
+            <summary className="flex cursor-pointer items-center gap-2 font-medium">
+              <Wrench size={13} className="shrink-0" />
+              <span className="break-all font-bold text-black">{toolName}</span>
+              <span className={isToolError ? "text-[#D02020]" : "text-black/60"}>
+                {isToolError ? "返回错误" : "已执行"}
+              </span>
+            </summary>
+            {message.text && (
+              <pre className="mt-2 max-h-48 overflow-x-auto whitespace-pre-wrap break-words border-t border-black/10 pt-2 font-mono text-[11px] leading-5 text-black/65">
+                {message.text}
+              </pre>
+            )}
+          </details>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAssistant && (isErrorStop || (isBlank && !hasToolCalls))) {
     const { summary, detail } = formatErrorMessage(rawError || (isErrorStop ? "模型未返回正文" : ""));
     return (
       <div className="flex justify-start">
@@ -148,6 +175,10 @@ export function AgentStreamMessageBubble({
       </div>
     );
   }
+  if (isAssistant && isBlank && hasToolCalls && !isErrorStop) {
+    return null;
+  }
+
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -157,7 +188,7 @@ export function AgentStreamMessageBubble({
             isUser ? "bg-[#F7E4E1] text-black" : isAssistant ? "bg-white text-black" : "bg-[var(--surface-muted)] text-black/70"
           }`}
         >
-          {message.text || (message.role === "toolResult" ? "工具返回已记录。" : "")}
+          {message.text}
         </div>
         {message.thinking && (
           <details className="mt-2 border border-black/20 bg-[#f6f4ee] px-3 py-2 text-left text-xs text-black/65">
