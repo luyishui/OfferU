@@ -81,6 +81,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ---- Trailing-slash redirect Location must stay relative ----
+# FastAPI/Starlette 对集合路由（/api/resume → /api/resume/）发的 307/308 重定向，
+# Location 是用请求 Host 头拼的绝对 URL。当请求经 Next dev rewrite / 反向代理转发时，
+# Host 变成了内网名（backend:8000），浏览器无法解析 -> 前端拿不到数据。
+# 这里把 Location 里的 scheme://host 剥掉，强制相对路径，浏览器相对当前源解析即可。
+@app.middleware("http")
+async def _relative_redirect_location(request, call_next):
+    response = await call_next(request)
+    if response.status_code in (301, 302, 303, 307, 308):
+        location = response.headers.get("location")
+        if location and "://" in location:
+            # 剥成 "path[?query]"；浏览器相对当前 origin 解析
+            from urllib.parse import urlsplit
+
+            parts = urlsplit(location)
+            rel = parts.path or "/"
+            if parts.query:
+                rel += "?" + parts.query
+            if parts.fragment:
+                rel += "#" + parts.fragment
+            response.headers["location"] = rel
+    return response
+
 # ---- 注册路由 ----
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(pools.router, prefix="/api/pools", tags=["Pools"])

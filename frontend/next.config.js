@@ -10,6 +10,10 @@ const INTERNAL_API_URL = process.env.INTERNAL_API_URL || "http://127.0.0.1:9000"
 
 const nextConfig = {
   output: "standalone",
+  // 关掉 Next 对尾斜杠的规范化重定向：/api/resume/ 本来要 308 到 /api/resume，
+  // 但 backend 又把 /api/resume 307 到 /api/resume/ -> 经 rewrite 代理形成无限循环。
+  // 后端 FastAPI 自带 redirect_slashes，由它统一处理；Next 不再插手。
+  skipTrailingSlashRedirect: true,
 };
 
 module.exports = (phase) => ({
@@ -17,6 +21,12 @@ module.exports = (phase) => ({
   distDir: phase === PHASE_DEVELOPMENT_SERVER ? ".next-dev" : ".next",
   async rewrites() {
     return [
+      // 精确映射带尾斜杠的集合路径：/api/x/ -> BASE/api/x/
+      // (:path* 对 "resume/" 会吃掉尾斜杠，导致 backend redirect_slashes 循环)
+      {
+        source: "/api/:path*/",
+        destination: `${INTERNAL_API_URL}/api/:path*/`,
+      },
       {
         source: "/api/:path*",
         destination: `${INTERNAL_API_URL}/api/:path*`,
