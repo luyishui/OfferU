@@ -778,6 +778,25 @@ def _policy(node: Mapping[str, Any]) -> dict[str, Any]:
     return _json_copy(schema["confirmation_policy"])
 
 
+async def _concurrent_plan_winner(db: Any, actor: Any, draft_id: str) -> models.ProposalPlan:
+    """Recover the durable ProposalPlan that won a same-draft concurrent seal.
+
+    Called after an IntegrityError on either the early plan flush or the final
+    commit/flush in compile_plan. Rolls the failed transaction back, reloads the
+    winning plan by draft_id, and enforces actor/session scope. Re-raises the
+    original IntegrityError when no winner row exists so a non-concurrent
+    integrity failure is never silently swallowed.
+    """
+    await db.rollback()
+    winner = (
+        await db.execute(select(models.ProposalPlan).where(models.ProposalPlan.draft_id == str(draft_id)))
+    ).scalar_one_or_none()
+    if winner is None:
+        raise
+    if winner.actor_id != str(actor.actor_id) or winner.session_id != str(actor.session_id):
+        raise PlanStateError("Concurrent Plan winner is outside the actor/session scope")
+    return winner
+
 async def compile_plan(
     db: Any,
     actor: Any,
@@ -930,6 +949,18 @@ async def compile_plan(
             immutable_json=immutable,
         )
         db.add(plan)
+        # The Plan row must be durable before any child row that references it:
+        # ConfirmationGroup.plan_id, OperationNode.(plan_id, confirmation_group_id),
+        # and NodeDependency.(plan_id, node_id) are bare string/composite FKs with no
+        # ORM relationship(), so the unit-of-work has no dependency processor to order
+        # their INSERTs after the parent's. Flush the plan first so the row exists
+        # before any child INSERT is emitted. A plan-insert IntegrityError (a
+        # concurrent plan sealed on the same draft_id) resolves the durable winner
+        # through _concurrent_plan_winner, the same recovery used at commit below.
+        try:
+            await db.flush()
+        except IntegrityError:
+            return await _concurrent_plan_winner(db, actor, draft_id)
         for group in groups:
             db.add(
                 models.ConfirmationGroup(
@@ -939,6 +970,9 @@ async def compile_plan(
                     dependency_group_ids=group["dependency_group_ids"],
                 )
             )
+        # OperationNode declares a composite FK on (plan_id, confirmation_group_id)
+        # into confirmation_groups, so groups must be flushed before node INSERTs.
+        await db.flush()
         for node in nodes:
             db.add(
                 models.OperationNode(
@@ -951,6 +985,10 @@ async def compile_plan(
                     risk_level=node["risk_level"], compensation_policy=node["compensation_policy"],
                 )
             )
+        # NodeDependency declares composite FKs on (plan_id, node_id) and
+        # (plan_id, depends_on_node_id) into operation_nodes, so nodes must be
+        # flushed before dependency INSERTs.
+        await db.flush()
         for dependency in dependencies:
             db.add(models.NodeDependency(plan_id=plan.plan_id, **dependency))
         merged_ids = {intent_id for node in nodes if len(node["source_intent_ids"]) > 1 for intent_id in node["source_intent_ids"][1:]}
@@ -965,15 +1003,7 @@ async def compile_plan(
             else:
                 await db.flush()
         except IntegrityError:
-            await db.rollback()
-            winner = (
-                await db.execute(select(models.ProposalPlan).where(models.ProposalPlan.draft_id == str(draft_id)))
-            ).scalar_one_or_none()
-            if winner is None:
-                raise
-            if winner.actor_id != str(actor.actor_id) or winner.session_id != str(actor.session_id):
-                raise PlanStateError("Concurrent Plan winner is outside the actor/session scope")
-            return winner
+            return await _concurrent_plan_winner(db, actor, draft_id)
         return plan
     except PlanCompilationError as exc:
         # Compilation validates and normalizes before any Plan/Node rows are added,
