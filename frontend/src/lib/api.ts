@@ -5,11 +5,17 @@
 // 基于 fetch API，支持 SWR 缓存
 // =============================================
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "http://127.0.0.1:8000");
+// 默认走同源：浏览器把请求发给 Next.js 前端自身（如 http://localhost:3011/api/...），
+// 再由 next.config.js 的 dev rewrite 代理到后端，保证 SameSite=Lax 的会话 cookie 能随请求携带。
+// 若显式设置 NEXT_PUBLIC_API_URL（例如联调远程后端），则仍按该地址直连。
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+
+// 后端返回的资源相对路径（如 /api/resume/123/photo）拼成可在 <img src> 中使用的 URL。
+// 同源模式下保持相对路径即可；配置了 NEXT_PUBLIC_API_URL 时才需要拼接绝对地址。
+export function resolveApiAssetUrl(url?: string): string {
+  if (!url) return "";
+  return url.startsWith("/") ? `${API_BASE}${url}` : url;
+}
 
 function buildQuery(params?: Record<string, unknown>) {
   const sp = new URLSearchParams();

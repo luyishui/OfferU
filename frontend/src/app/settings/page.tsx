@@ -35,6 +35,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useConfig, updateConfig } from "@/lib/hooks";
+import { API_BASE } from "@/lib/api";
 
 interface ProviderModelPreset {
   id: string;
@@ -291,11 +292,6 @@ function TestLlmButton() {
     setTesting(true);
     setResult(null);
     try {
-      const API_BASE =
-        process.env.NEXT_PUBLIC_API_URL ||
-        (typeof window !== "undefined"
-          ? `${window.location.protocol}//${window.location.hostname}:8000`
-          : "http://127.0.0.1:8000");
       const res = await fetch(`${API_BASE}/api/config/test-llm`, { method: "POST" });
       const data = await res.json();
       setResult({ success: data.success, message: data.message });
@@ -343,11 +339,6 @@ function FetchModelsButton({ baseUrl, apiKey, onModelsFetched }: FetchModelsButt
     setFetching(true);
     setMessage(null);
     try {
-      const API_BASE =
-        process.env.NEXT_PUBLIC_API_URL ||
-        (typeof window !== "undefined"
-          ? `${window.location.protocol}//${window.location.hostname}:8000`
-          : "http://127.0.0.1:8000");
       const res = await fetch(`${API_BASE}/api/config/fetch-models`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

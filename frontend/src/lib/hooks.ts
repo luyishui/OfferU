@@ -8,17 +8,13 @@
 
 import useSWR from "swr";
 import {
+  API_BASE,
   optimizeAgentChatStream,
   type AgentStreamEvent,
   type PlanGroupExecutionEvent,
   type PlanNodeExecutionEvent,
 } from "./api";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "http://127.0.0.1:8000");
 
 function formatBackendNetworkError(error: unknown) {
   const reason = error instanceof Error ? error.message : String(error);

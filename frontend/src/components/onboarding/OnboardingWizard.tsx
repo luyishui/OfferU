@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { bauhausFieldClassNames } from "@/lib/bauhaus";
 import { createResume, updateConfig, useConfig, type ProfileImportResult } from "@/lib/hooks";
-import { profileApi, resumeApi } from "@/lib/api";
+import { API_BASE, profileApi, resumeApi } from "@/lib/api";
 import AIImportModal, { AI_IMPORT_PROMPT, parseAiImportJson } from "@/app/profile/components/AIImportModal";
 
 interface OnboardingWizardProps {
@@ -768,11 +768,6 @@ export function OnboardingWizard({ onComplete, onSkip }: OnboardingWizardProps) 
     setUploadResult(null);
 
     try {
-      const API_BASE =
-        process.env.NEXT_PUBLIC_API_URL ||
-        (typeof window !== "undefined"
-          ? `${window.location.protocol}//${window.location.hostname}:8000`
-          : "http://127.0.0.1:8000");
       const formData = new FormData();
       formData.append("file", file);
 

@@ -4,12 +4,8 @@ import { useParams } from "next/navigation";
 import ResumePreview from "../../components/ResumePreview";
 import { DEFAULT_STYLE_CONFIG } from "../../components/StyleToolbar";
 import { useResume } from "@/lib/hooks";
+import { resolveApiAssetUrl } from "@/lib/api";
 
-function resolvePhotoUrl(photoUrl?: string) {
-  if (!photoUrl) return "";
-  if (!photoUrl.startsWith("/")) return photoUrl;
-  return `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${photoUrl}`;
-}
 
 export default function ResumePrintPage() {
   const params = useParams();
@@ -30,7 +26,7 @@ export default function ResumePrintPage() {
         <ResumePreview
           userName={resume.user_name || ""}
           title={resume.title || ""}
-          photoUrl={resolvePhotoUrl(resume.photo_url)}
+          photoUrl={resolveApiAssetUrl(resume.photo_url)}
           summary={resume.summary || ""}
           contactJson={resume.contact_json || {}}
           sections={resume.sections || []}

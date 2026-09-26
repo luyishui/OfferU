@@ -14,6 +14,7 @@ import {
   type NormalizedResumeSection,
 } from "./templates/templateSettings";
 import { dateRange, splitBullets, textFromHtml } from "./templates/shared";
+import { resolveApiAssetUrl } from "@/lib/api";
 
 interface Section {
   id: number;
@@ -154,18 +155,12 @@ function normalizeSectionItem(sectionType: string, item: any, index: number): No
   };
 }
 
-function resolveAssetUrl(url?: string) {
-  if (!url) return "";
-  return url.startsWith("/")
-    ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${url}`
-    : url;
-}
 
 function normalizeContactJson(contactJson: Record<string, string> = {}) {
   const contact = { ...contactJson };
   for (const key of ["schoolLogoUrl", "universityLogoUrl", "logoUrl", "school_logo_url"]) {
     if (contact[key]) {
-      contact[key] = resolveAssetUrl(contact[key]);
+      contact[key] = resolveApiAssetUrl(contact[key]);
     }
   }
   return contact;

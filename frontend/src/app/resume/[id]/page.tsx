@@ -36,7 +36,7 @@ import {
   useProfile,
   type ProfileSection,
 } from "@/lib/hooks";
-import { resumeApi } from "@/lib/api";
+import { resumeApi, resolveApiAssetUrl } from "@/lib/api";
 import SectionEditor, { createEmptySectionItem } from "../components/SectionEditor";
 import ResumePreview from "../components/ResumePreview";
 import StyleToolbar, { DEFAULT_STYLE_CONFIG, MIN_STYLE_CONFIG } from "../components/StyleToolbar";
@@ -451,12 +451,6 @@ export default function ResumeEditorPage() {
     setContactJson((prev) => ({ ...prev, [key]: value }));
   };
 
-  const resolveAssetUrl = (url?: string) => {
-    if (!url) return "";
-    return url.startsWith("/")
-      ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${url}`
-      : url;
-  };
 
   /** 保存简历主信息到后端 */
   const handleSave = useCallback(async () => {
@@ -1081,7 +1075,7 @@ export default function ResumeEditorPage() {
                   {photoUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={photoUrl.startsWith("/") ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${photoUrl}` : photoUrl}
+                      src={resolveApiAssetUrl(photoUrl)}
                       alt="头像"
                       className="h-14 w-14 object-cover border-2 border-black"
                     />
@@ -1114,7 +1108,7 @@ export default function ResumeEditorPage() {
                     <div className="flex h-14 w-24 items-center justify-center border-2 border-black bg-white">
                       {contactJson.schoolLogoUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={resolveAssetUrl(contactJson.schoolLogoUrl)} alt="大学校徽" className="max-h-12 max-w-[88px] object-contain" />
+                        <img src={resolveApiAssetUrl(contactJson.schoolLogoUrl)} alt="大学校徽" className="max-h-12 max-w-[88px] object-contain" />
                       ) : (
                         <ImageIcon size={18} className="text-black/35" />
                       )}
@@ -1364,11 +1358,7 @@ export default function ResumeEditorPage() {
               ref={previewRef}
               userName={userName}
               title={title}
-              photoUrl={
-                photoUrl.startsWith("/")
-                  ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${photoUrl}`
-                  : photoUrl
-              }
+              photoUrl={resolveApiAssetUrl(photoUrl)}
               summary={summary}
               contactJson={contactJson}
               sections={sections}
