@@ -194,11 +194,15 @@ export function HarnessAgentDock() {
       setHistoryOpen(false);
       let restoredState: AgentStreamState = {
         ...createInitialAgentStreamState(),
-        messages: (conversation.messages || []).map((message, index): DisplayAgentMessage => ({
-          id: `${conversation.id}-${index}`,
-          role: message.role,
-          text: message.content,
-        })),
+        // Skip persisted toolResult payloads: they are LLM-facing and must not
+        // rehydrate into raw-JSON bubbles; ToolExecutionList is the only UI surface.
+        messages: (conversation.messages || [])
+          .filter((message) => String(message.role) !== "toolResult")
+          .map((message, index): DisplayAgentMessage => ({
+            id: `${conversation.id}-${index}`,
+            role: message.role,
+            text: message.content,
+          })),
       };
       for (const proposal of bootstrap.proposals || []) {
         restoredState = agentStreamReducer(restoredState, {
@@ -521,17 +525,23 @@ export function HarnessAgentDock() {
         </div>
       </ScrollShadow>
 
-      <div className="border-t border-black/10 bg-[#F7E4E1] px-4 py-3">
-        <PlanExecutionList plans={agentState.plans} />
+      {(Object.keys(agentState.plans).length > 0 ||
+        Object.values(agentState.proposals).some((proposal) => {
+          const id = String(proposal?.proposal_id || proposal?.id || "");
+          return Boolean(id) && !resolvedProposalIds.has(id);
+        })) && (
+        <div className="border-t border-black/10 bg-[#F7E4E1] px-4 py-3">
+          <PlanExecutionList plans={agentState.plans} />
 
-      <ProposalList
-          proposals={agentState.proposals}
-          resolvedIds={resolvedProposalIds}
-          loading={loading}
-          onConfirm={(id) => void confirmProposal(id)}
-          onReject={(id) => void rejectProposal(id)}
-        />
-      </div>
+          <ProposalList
+            proposals={agentState.proposals}
+            resolvedIds={resolvedProposalIds}
+            loading={loading}
+            onConfirm={(id) => void confirmProposal(id)}
+            onReject={(id) => void rejectProposal(id)}
+          />
+        </div>
+      )}
 
       <ManualReviewCaseList
         sessionId={conversationId}
