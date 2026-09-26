@@ -5,7 +5,7 @@ Prepare or optimize a resume using verified profile facts and the selected job d
 
 ## Required sequence
 1. Activate this Skill before collecting evidence.
-2. Read the target Job, Profile, and relevant ProfileSection records with Operator tools.
+2. Read the target Job, Profile, and relevant ProfileSection records with Operator tools. For profile sections, first `query_records(model="profile_section")` to enumerate all section ids, then `get_record(model="profile_section", id=<each id>)` for every one; also `get_record(model="profile")` and `get_record(model="job")`. Enumeration alone is not evidence — readiness requires the per-record detail reads.
 3. Record user exclusions and unsupported-claim boundaries in the current session.
 4. Stage `generate_resume` via `invoke_action` once evidence is durable — the resulting proposal card IS the strategy confirmation the runtime requires; do not wait for a free-text user reply first.
 5. Confirm that proposal (or its plan group) to apply the write.

@@ -2010,8 +2010,6 @@ async def _collect_resume_readiness_evidence(
     session_state: dict[str, Any],
     payload: Mapping[str, Any],
 ) -> None:
-    if session_state.get("active_skill") != "resume-optimizer":
-        return
     result_message = payload.get("result")
     if not isinstance(result_message, ToolResultMessage) or result_message.is_error:
         return
@@ -2022,6 +2020,23 @@ async def _collect_resume_readiness_evidence(
     tool_call = payload.get("tool_call")
     tool_name = str(getattr(tool_call, "name", "") or result_message.tool_name)
     args = payload.get("args") if isinstance(payload.get("args"), Mapping) else {}
+    # Same-turn activate refresh: a successful manage_session(activate_skill)
+    # makes the skill active immediately, so subsequent profile/job reads this
+    # turn collect evidence under it and turn-end _persist_active_skill_state
+    # persists under resume-optimizer. The executor's _merge_session_snapshot
+    # already writes session_state["active_skill"]; refreshing here keeps this
+    # hook correct even if that merge path changes.
+    if tool_name == "manage_session" and str(raw_result.get("operation") or "") == "activate_skill":
+        snapshot = raw_result.get("session_snapshot") if isinstance(raw_result.get("session_snapshot"), Mapping) else {}
+        activated = str(snapshot.get("active_skill") or "").strip()
+        if not activated:
+            updates = args.get("updates") if isinstance(args.get("updates"), Mapping) else {}
+            activated = str(
+                updates.get("active_skill") or updates.get("skill") or updates.get("name") or ""
+            ).strip()
+        if activated:
+            session_state["active_skill"] = activated
+        return
     model = str(raw_result.get("model") or args.get("model") or "").strip()
     if tool_name not in {"get_record", "query_records"} or model not in {"profile", "profile_section", "job"}:
         return
@@ -2045,7 +2060,6 @@ async def _collect_resume_readiness_evidence(
 
     _bind_evidence_owner(evidence, actor)
     session_state["resume_readiness_evidence"] = evidence
-
 
 async def _drain_repair_messages(turn_control: dict[str, Any]) -> list[AgentMessage]:
     messages = list(turn_control.get("pending_repair_messages") or [])

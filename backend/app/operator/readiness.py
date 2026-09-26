@@ -142,6 +142,13 @@ def readiness_recovery_payload(missing_requirements: list[dict[str, Any]]) -> di
 
 
 def profile_read_evidence_ready(evidence: Any) -> bool:
+    """Whether profile+profile_section read evidence is sufficient to gate
+    generate_resume. The load-bearing proof is real detail reads: get_record
+    on profile and on at least one profile_section record demonstrates the
+    model actually read profile sections. query_records enumeration
+    (profile_section_ids / profile_section_count) is belt-and-suspenders —
+    when present we still enforce detail_ids ⊆ section_ids, but its absence
+    does not fail readiness."""
     if not isinstance(evidence, Mapping):
         return False
     source = str(evidence.get("source") or "").strip()
@@ -152,7 +159,7 @@ def profile_read_evidence_ready(evidence: Any) -> bool:
     detail_models = _string_set(evidence.get("detail_models"))
     if not {"profile", "profile_section"}.issubset(models):
         return False
-    if not {"get_record", "query_records"}.issubset(tools):
+    if "get_record" not in tools:
         return False
     if not {"profile", "profile_section"}.issubset(detail_models):
         return False
@@ -160,13 +167,12 @@ def profile_read_evidence_ready(evidence: Any) -> bool:
         return False
     section_ids = _ordered_string_ids(evidence.get("profile_section_ids"))
     detail_ids = _ordered_string_ids(evidence.get("profile_section_detail_ids"))
-    if not section_ids or not detail_ids:
+    if not detail_ids:
         return False
-    if not set(detail_ids).issubset(set(section_ids)):
+    if section_ids and not set(detail_ids).issubset(set(section_ids)):
         return False
-    section_count = _int_or_none(evidence.get("profile_section_count"))
     detail_count = _int_or_none(evidence.get("profile_section_detail_count"))
-    if section_count is None or section_count <= 0 or detail_count is None or detail_count <= 0:
+    if detail_count is None or detail_count <= 0:
         return False
     return detail_count == len(detail_ids)
 
