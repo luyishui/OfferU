@@ -17,3 +17,6 @@ scripts/
 *.log
 .DS_Store
 Thumbs.db
+.eval-runs/
+worktrees/
+.git/
