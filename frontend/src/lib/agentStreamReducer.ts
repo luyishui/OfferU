@@ -100,8 +100,8 @@ export function agentStreamReducer(state: AgentStreamState, event: AgentStreamEv
         },
       };
     case "tool_execution_update":
+      // Tool payloads are LLM-facing; never surface raw serialized results in the UI.
       return updateTool(state, event.tool_call_id || event.toolCallId, {
-        summary: textFromUnknown(event.partial_result) || undefined,
         result: event.partial_result,
       });
     case "tool_execution_end":
@@ -110,7 +110,6 @@ export function agentStreamReducer(state: AgentStreamState, event: AgentStreamEv
         status: event.is_error ? "error" : "done",
         isError: Boolean(event.is_error),
         result: event.result,
-        summary: textFromUnknown(event.result) || undefined,
       });
     case "proposal":
       return mergeProposal(state, proposalFromEvent(event));
@@ -331,6 +330,11 @@ function applyMessageUpdate(state: AgentStreamState, event: AgentStreamEvent): A
 }
 
 function solidifyMessage(state: AgentStreamState, message: AgentMessage | undefined): AgentStreamState {
+  // toolResult payloads are LLM-facing; the compact ToolExecutionList status line is
+  // the only UI surface for tool executions, so we never create a display bubble.
+  if (message?.role === "toolResult") {
+    return { ...state, streaming: null };
+  }
   const display = displayFromMessageOrStreaming(message, state.streaming);
   if (!display) return { ...state, streaming: null };
   if (isDuplicateUserEcho(state.messages, display)) {
@@ -342,7 +346,6 @@ function solidifyMessage(state: AgentStreamState, message: AgentMessage | undefi
     messages: [...state.messages, display],
   };
 }
-
 function isDuplicateUserEcho(messages: DisplayAgentMessage[], display: DisplayAgentMessage): boolean {
   if (display.role !== "user") return false;
   const last = messages[messages.length - 1];

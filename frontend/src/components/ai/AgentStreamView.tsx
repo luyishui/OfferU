@@ -21,12 +21,16 @@ export function apiMessagesFromDisplay(messages: DisplayAgentMessage[]): Harness
 }
 
 export function messagesFromTree(tree: AgentConversationTree | null | undefined): DisplayAgentMessage[] {
-  return (tree?.messages || []).map((message, index) => ({
-    id: message.entry_id || `tree-message-${index}`,
-    role: normalizeDisplayRole(message.role),
-    text: message.content || "",
-    raw: message.message,
-  }));
+  // toolResult entries are LLM payloads; only the compact ToolExecutionList line is
+  // rendered, so persisted tool results must not rehydrate into JSON bubbles.
+  return (tree?.messages || [])
+    .filter((message) => normalizeDisplayRole(message.role) !== "toolResult")
+    .map((message, index) => ({
+      id: message.entry_id || `tree-message-${index}`,
+      role: normalizeDisplayRole(message.role),
+      text: message.content || "",
+      raw: message.message,
+    }));
 }
 
 export function proposalId(proposal: Record<string, unknown>): string {
@@ -241,7 +245,7 @@ export function ToolExecutionList({ executions }: { executions: Record<string, T
               {tool.status === "running" ? "运行中" : tool.status === "error" ? "出错" : "完成"}
             </Chip>
           </div>
-          {tool.summary && <p className="mt-1 break-words font-medium leading-5 text-black/60">{tool.summary}</p>}
+          {/* Tool payloads are LLM-facing: no raw result/summary body is rendered. */}
         </div>
       ))}
     </div>
