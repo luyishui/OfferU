@@ -6,7 +6,7 @@ import MarkdownIt from "markdown-it";
 import { Button } from "@nextui-org/react";
 import { FileText, MessageSquare, Play, SendHorizonal, Square } from "lucide-react";
 import { streamOptimizeAgentChat, OptimizeAgentStreamEvent } from "@/lib/hooks";
-import { harnessAgentApi, type AgentStreamEvent } from "@/lib/api";
+import { API_BASE, harnessAgentApi, type AgentStreamEvent } from "@/lib/api";
 import { markConfirmRequestProcessed } from "@/lib/agentStreamReducer";
 import { cleanRichHtml } from "@/app/resume/components/templates/shared";
 import { ManualReviewCaseList, PlanExecutionList } from "@/components/ai/AgentStreamView";
@@ -19,11 +19,6 @@ import {
   type AgentStreamState,
 } from "@/lib/agentStreamReducer";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (typeof window !== "undefined"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "http://127.0.0.1:8000");
 
 const md = new MarkdownIt({
   html: false,
