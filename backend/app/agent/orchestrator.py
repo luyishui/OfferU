@@ -1736,7 +1736,7 @@ async def _pending_projection_entry(
         dependency_group_ids = list(group_meta.get("dependency_group_ids") or [])
         blocked = [
             str(dep) for dep in dependency_group_ids
-            if str((meta.get(str(dep)) or {}).get("status") or "") not in _GROUP_DEPENDENCY_SATISFIED_STATUSES
+            if str((meta.get(str(dep)) or {}).get("status") or "") not in GROUP_DEPENDENCY_SATISFIED_STATUSES
         ]
         if blocked:
             group_blocked = True
