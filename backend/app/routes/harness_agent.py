@@ -68,6 +68,24 @@ def _authenticated_subject(request: Request) -> str:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
+def _resolve_or_issue_subject(token: str | None) -> tuple[str, str | None]:
+    """Return ``(subject, issued_token)``.
+
+    A cookieless request mints a fresh principal. A cookie whose signature is
+    stale or forged (e.g. SECRET_KEY rotated, or a cookie minted by an older
+    process) is treated the same as "no principal" — mint a fresh one instead of
+    locking the browser out with a permanent 401. Callers that cannot create
+    sessions must not use this helper; they keep strict ``_authenticated_subject``.
+    """
+    if token:
+        try:
+            return verify_principal_token(token), None
+        except SessionAuthorityError:
+            pass
+    issued_token, subject = issue_principal_token()
+    return subject, issued_token
+
+
 async def _actor_for_request_session(
     db: AsyncSession,
     request: Request,
@@ -77,15 +95,19 @@ async def _actor_for_request_session(
 ) -> tuple[ActorContext, str | None]:
     token = request.cookies.get(_BROWSER_PRINCIPAL_COOKIE)
     issued_token: str | None = None
-    if token:
+    if not token:
+        if not allow_create:
+            raise HTTPException(status_code=401, detail="authenticated browser principal is required")
+        subject, issued_token = _resolve_or_issue_subject(None)
+    elif allow_create:
+        subject, issued_token = _resolve_or_issue_subject(token)
+    else:
+        # Strict path: a stale/forged cookie on a non-creating endpoint must 401,
+        # not silently adopt a fresh principal.
         try:
             subject = verify_principal_token(token)
         except SessionAuthorityError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
-    elif allow_create:
-        issued_token, subject = issue_principal_token()
-    else:
-        raise HTTPException(status_code=401, detail="authenticated browser principal is required")
     try:
         actor = await bind_session_authority(
             db, session_id=session_id, auth_subject=subject, allow_create=allow_create
@@ -166,14 +188,9 @@ async def chat_stream(
 ):
     conversation_id = _conversation_id(body.conversation_id)
     browser_token = request.cookies.get(_BROWSER_PRINCIPAL_COOKIE)
-    if browser_token:
-        try:
-            auth_subject = verify_principal_token(browser_token)
-        except SessionAuthorityError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        issued_token = None
-    else:
-        issued_token, auth_subject = issue_principal_token()
+    # Chat is a session-creating endpoint, so a stale/forged cookie self-heals:
+    # mint a fresh principal rather than 401-ing on a rotated SECRET_KEY.
+    auth_subject, issued_token = _resolve_or_issue_subject(browser_token)
     actor = ActorContext(
         actor_id=models.LOCAL_DEFAULT_ACTOR_ID,
         session_id=conversation_id,
@@ -458,14 +475,7 @@ async def _actor_for_memory_session(
     forged or foreign tokens are rejected with 401/403.
     """
     token = request.cookies.get(_BROWSER_PRINCIPAL_COOKIE)
-    issued_token: str | None = None
-    if token:
-        try:
-            subject = verify_principal_token(token)
-        except SessionAuthorityError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-    else:
-        issued_token, subject = issue_principal_token()
+    subject, issued_token = _resolve_or_issue_subject(token)
     try:
         actor = await bind_session_authority(
             db,
