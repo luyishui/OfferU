@@ -348,7 +348,17 @@ async def list_batches(
         {
             "batch_id": r.batch_id,
             "source": batch_meta[r.batch_id].source if r.batch_id in batch_meta else "",
-            "keywords": batch_meta[r.batch_id].keywords if r.batch_id in batch_meta else [],
+            "keywords": (
+                batch_meta[r.batch_id].keywords
+                if r.batch_id in batch_meta and isinstance(batch_meta[r.batch_id].keywords, list)
+                else [
+                    k.strip()
+                    for k in str(batch_meta[r.batch_id].keywords or "").split(",")
+                    if k.strip()
+                ]
+                if r.batch_id in batch_meta
+                else []
+            ),
             "location": batch_meta[r.batch_id].location if r.batch_id in batch_meta else "",
             "total": r.total or 0,
             "inbox_count": r.inbox_count or 0,
@@ -844,7 +854,15 @@ def _job_to_dict(job: Job) -> dict:
         "user_notes": job.user_notes or "",
         "posted_at": str(job.posted_at) if job.posted_at else None,
         "summary": job.summary,
-        "keywords": job.keywords or [],
+        # keywords is a JSON column that some older scraper rows stored as a
+        # comma-separated STRING (e.g. "AI,产品运营,实习") instead of a list —
+        # `job.keywords or []` then emits a bare string and the frontend's
+        # `.slice().map()` crashes. Coerce to a list here.
+        "keywords": (
+            job.keywords
+            if isinstance(job.keywords, list)
+            else [k.strip() for k in str(job.keywords or "").split(",") if k.strip()]
+        ),
         "salary_min": job.salary_min,
         "salary_max": job.salary_max,
         "salary_text": job.salary_text or "",

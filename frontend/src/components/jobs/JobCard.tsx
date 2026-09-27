@@ -167,18 +167,23 @@ export function JobCard({
               {job.job_type}
             </span>
           )}
-          {job.keywords?.slice(0, 2).map((keyword, index) => (
-            <span
-              key={`${keyword}-${index}`}
-              className={`bauhaus-chip ${
-                index % 2 === 0
-                  ? "bg-[var(--surface)] text-black"
-                  : "bg-[var(--surface-muted)] text-black/75"
-              }`}
-            >
-              {keyword}
-            </span>
-          ))}
+          {(Array.isArray(job.keywords)
+            ? job.keywords
+            : String(job.keywords || "").split(",").map((k) => k.trim()).filter(Boolean)
+          )
+            .slice(0, 2)
+            .map((keyword, index) => (
+              <span
+                key={`${keyword}-${index}`}
+                className={`bauhaus-chip ${
+                  index % 2 === 0
+                    ? "bg-[var(--surface)] text-black"
+                    : "bg-[var(--surface-muted)] text-black/75"
+                }`}
+              >
+                {keyword}
+              </span>
+            ))}
         </div>
 
         <div className="flex flex-wrap gap-2 pt-1">
