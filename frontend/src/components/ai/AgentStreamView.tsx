@@ -405,6 +405,10 @@ export function ProposalList({
     <div className="space-y-2">
       {rows.map((proposal) => {
         const id = proposalId(proposal);
+        // After the backend answers execution_in_progress/authorized the card
+        // stays mounted until a plan_event/next_proposals resolves it; meanwhile
+        // show the in-flight state instead of a dead Confirm button.
+        const executing = ["executing", "authorized"].includes(String(proposal.status || ""));
         return (
           <div key={id} className="border-2 border-black bg-white px-3 py-2 text-xs text-black">
             <div className="flex items-start gap-2">
@@ -429,23 +433,32 @@ export function ProposalList({
                 )}
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                isDisabled={loading}
-                onPress={() => onConfirm(id)}
-                className="bauhaus-button bauhaus-button-red !min-h-8 !px-3 !py-1 !text-xs"
-              >
-                确认
-              </Button>
-              <Button
-                size="sm"
-                isDisabled={loading}
-                onPress={() => onReject(id)}
-                className="bauhaus-button bauhaus-button-outline !min-h-8 !px-3 !py-1 !text-xs"
-              >
-                拒绝
-              </Button>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {executing ? (
+                <span className="inline-flex items-center gap-1.5 border border-black bg-[var(--surface-muted)] px-3 py-1 font-bold text-black/70">
+                  <Loader2 size={13} className="animate-spin" />
+                  执行中，请稍候…
+                </span>
+              ) : (
+                <>
+                  <Button
+                    size="sm"
+                    isDisabled={loading}
+                    onPress={() => onConfirm(id)}
+                    className="bauhaus-button bauhaus-button-red !min-h-8 !px-3 !py-1 !text-xs"
+                  >
+                    确认
+                  </Button>
+                  <Button
+                    size="sm"
+                    isDisabled={loading}
+                    onPress={() => onReject(id)}
+                    className="bauhaus-button bauhaus-button-outline !min-h-8 !px-3 !py-1 !text-xs"
+                  >
+                    拒绝
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         );

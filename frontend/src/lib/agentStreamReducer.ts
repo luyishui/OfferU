@@ -236,12 +236,23 @@ export function applyManualReviewResolutionResponse(
 
 export function applyProposalDecisionResponse(
   state: AgentStreamState,
-  response: { continuation?: HarnessAgentResponse; next_proposals?: Record<string, unknown>[]; plan_event?: AgentStreamEvent } | null | undefined
+  response: { proposal_id?: string; status?: string; continuation?: HarnessAgentResponse; next_proposals?: Record<string, unknown>[]; plan_event?: AgentStreamEvent } | null | undefined
 ): AgentStreamState {
   if (!response) return state;
   let next = applyConfirmContinuation(state, response.continuation);
   for (const proposal of response.next_proposals || []) next = mergeProposal(next, proposal);
   if (response.plan_event) next = agentStreamReducer(next, response.plan_event);
+  // A durably authorized Plan Group returns before its execution job finishes;
+  // the resolved set intentionally excludes these statuses so the card stays
+  // mounted, but without a status marker it re-renders with a live Confirm
+  // button and no feedback. Stamp "executing" so ProposalList can render the
+  // in-flight state; a later plan_event/next_proposals refresh overwrites it
+  // with the authoritative group status.
+  const decisionStatus = String(response.status || "");
+  const proposalId = String(response.proposal_id || "");
+  if ((decisionStatus === "execution_in_progress" || decisionStatus === "authorized") && proposalId) {
+    next = mergeProposal(next, { proposal_id: proposalId, status: "executing" });
+  }
   return next;
 }
 
