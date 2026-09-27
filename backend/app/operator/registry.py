@@ -2088,7 +2088,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         "organize_jobs_into_pool",
         "Organize jobs into pool",
         "Create or reuse a visible job pool and move selected jobs into it in one guarded transaction.",
-        side_effects=("create:pool", "patch:job"),
+        side_effects=("create:pool", "patch:pool", "patch:job"),
         risk=4,
         result_model="pool",
         input_properties={
@@ -2321,10 +2321,12 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         "parse_resume",
         "Parse resume",
         "Parse an uploaded or pasted resume into profile/resume records.",
-        side_effects=("create:resume", "create:resume_section", "create:profile", "create:profile_section"),
+        side_effects=("create:resume", "create:resume_section", "create:profile", "create:profile_section", "patch:profile"),
         effect_specs=(
             EffectSpec("create", "resume"), EffectSpec("create", "resume_section"),
             EffectSpec("create", "profile"), EffectSpec("create", "profile_section"),
+            EffectSpec("patch", "profile", visibility="supporting",
+                       description="Synchronize the parent Profile personal-archive projection for the created ProfileSection."),
         ),
         risk=3,
         result_model="resume",
@@ -2348,7 +2350,13 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
     "profile_chat_confirm": _action(
         "profile_chat_confirm", "Confirm profile chat extraction",
         "Confirm extracted profile bullets from the current backend-bound profile chat session.",
-        side_effects=("create:profile_section",), risk=3, result_model="profile_section",
+        side_effects=("create:profile_section", "patch:profile"),
+        effect_specs=(
+            EffectSpec("create", "profile_section"),
+            EffectSpec("patch", "profile", visibility="supporting",
+                       description="Synchronize the parent Profile personal-archive projection for the confirmed ProfileSection."),
+        ),
+        risk=3, result_model="profile_section",
         input_properties={"accepted_item_ids": _STRING_ARRAY, "candidate": _OBJECT, "edits": _OBJECT},
         output_properties={
             "status": _STRING, "tool_name": _STRING, "action": _STRING, "model": _STRING,
