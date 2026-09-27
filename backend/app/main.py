@@ -87,23 +87,47 @@ app.add_middleware(
 # Location 是用请求 Host 头拼的绝对 URL。当请求经 Next dev rewrite / 反向代理转发时，
 # Host 变成了内网名（backend:8000），浏览器无法解析 -> 前端拿不到数据。
 # 这里把 Location 里的 scheme://host 剥掉，强制相对路径，浏览器相对当前源解析即可。
-@app.middleware("http")
-async def _relative_redirect_location(request, call_next):
-    response = await call_next(request)
-    if response.status_code in (301, 302, 303, 307, 308):
-        location = response.headers.get("location")
-        if location and "://" in location:
-            # 剥成 "path[?query]"；浏览器相对当前 origin 解析
-            from urllib.parse import urlsplit
+# 用纯 ASGI 中间件改写 3xx Location（不包 BaseHTTPMiddleware / request.receive）。
+# BaseHTTPMiddleware 会替换 request.receive，sse-starlette EventSourceResponse
+# 在被包装的 channel 上做 is_disconnected() 轮询会挂起 -> SSE 事件排队但永不
+# flush，回复要等整个 turn 结束/刷新才出现（Bug：卡在"正在连接 AI"）。
+# 这里只拦截 send 侧的 http.response.start，不重写 receive —— SSE 正常流。
+class _RelativeRedirectLocationMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-            parts = urlsplit(location)
-            rel = parts.path or "/"
-            if parts.query:
-                rel += "?" + parts.query
-            if parts.fragment:
-                rel += "#" + parts.fragment
-            response.headers["location"] = rel
-    return response
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_relative_location(message):
+            if (
+                message["type"] == "http.response.start"
+                and message.get("status") in (301, 302, 303, 307, 308)
+            ):
+                headers = list(message.get("headers") or [])
+                for idx, (name, value) in enumerate(headers):
+                    if name.lower() == b"location":
+                        location = value.decode("latin-1")
+                        if "://" in location:
+                            from urllib.parse import urlsplit
+
+                            parts = urlsplit(location)
+                            rel = parts.path or "/"
+                            if parts.query:
+                                rel += "?" + parts.query
+                            if parts.fragment:
+                                rel += "#" + parts.fragment
+                            headers[idx] = (name, rel.encode("latin-1"))
+                            message = {**message, "headers": headers}
+                        break
+            await send(message)
+
+        await self.app(scope, receive, send_with_relative_location)
+
+
+app.add_middleware(_RelativeRedirectLocationMiddleware)
 
 # ---- 注册路由 ----
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
