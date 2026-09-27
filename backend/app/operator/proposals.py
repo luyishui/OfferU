@@ -643,10 +643,16 @@ async def _claim_plan_group_execution_job(
         models.PlanGroupExecutionJob.claim_generation == int(job.claim_generation or 0),
     ]
     if job.status == "running":
-        conditions.extend([
-            models.PlanGroupExecutionJob.claim_token == str(job.claim_token or ""),
-            models.PlanGroupExecutionJob.lease_expires_at <= now,
-        ])
+        # The lease is expired here (the early return above covers a live
+        # lease), so the previous claimant is dead or lost its heartbeat.
+        # claim_generation equality above is the sole optimistic-lock guard:
+        # matching the dead claim's token adds nothing and can permanently
+        # wedge the job — a NULL token compares as '' and never matches in
+        # SQL, and a token the claimant cannot prove is dead weight. The
+        # winning CAS writes a NEW token and bumps claim_generation, fencing
+        # zombie renew/release from the old claim (they predicate on the
+        # stale token AND generation).
+        conditions.append(models.PlanGroupExecutionJob.lease_expires_at <= now)
     changed = await session.execute(
         update(models.PlanGroupExecutionJob)
         .where(*conditions)
@@ -983,10 +989,17 @@ async def _execute_and_finalize_authorized_plan(
         execution_result = await execution_result_from_receipts(
             session, plan_id_value, group_id=group_id_value
         )
-    except Exception as exc:
+    except BaseException as exc:
+        # asyncio.CancelledError is a BaseException, NOT an Exception: without
+        # this wider catch a cancelled confirm skips the heartbeat stop and the
+        # detached task renews the job lease forever, wedging the job "running".
+        # Always stop + await the heartbeat and release the claim so the next
+        # confirm (or the recovery sweep) can re-drive execution.
         stop_job_heartbeat.set()
-        await job_heartbeat_task
-        await _release_plan_group_execution_job(session, proposal_id_value, job_token, job_generation, exc)
+        try:
+            await job_heartbeat_task
+        finally:
+            await _release_plan_group_execution_job(session, proposal_id_value, job_token, job_generation, exc)
         raise
     stop_job_heartbeat.set()
     await job_heartbeat_task
