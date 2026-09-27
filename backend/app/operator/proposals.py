@@ -32,7 +32,7 @@ from app.operator.confirmation_context import (
     confirmation_prepare_boundary,
 )
 from app.operator.create_conflicts import reject_duplicate_job_create_conflict
-from app.operator.plan_authorization import group_authorization_digest, record_group_decision
+from app.operator.plan_authorization import AuthorizationError, group_authorization_digest, record_group_decision
 from app.operator.readiness import resume_scope_from_runtime_state
 from app.operator.plan_snapshots import (
     PlanSnapshotIntegrityError,
@@ -344,6 +344,52 @@ async def _record_plan_group_rejection(session: AsyncSession, actor: ActorContex
     )
 
 
+async def _heal_torn_plan_group_authorization(
+    session: AsyncSession,
+    actor: ActorContext,
+    proposal: models.ProposalCache,
+    group: models.ConfirmationGroup,
+) -> None:
+    """Re-drive the lost group-decision effects of a torn Plan authorization.
+
+    A torn authorization committed the ProposalCache `authorized` status and its
+    durable PlanGroupExecutionJob but rolled back the ConfirmationDecision rows,
+    `group.status` and the `pending -> authorized` node transition written in the
+    same transaction. Replaying `_record_plan_group_confirmation` with the stored
+    confirmation events' event_ids is idempotent: `record_group_decision`
+    early-returns on an existing decision row and raises AuthorizationError when
+    the group already left its confirmable state.
+    """
+    if str(getattr(group, "status", "") or "") not in {"pending", "awaiting_more_confirmations"}:
+        return
+    healed_any = False
+    for event in _events(proposal):
+        if str(getattr(group, "status", "") or "") not in {"pending", "awaiting_more_confirmations"}:
+            break
+        if str(event.get("status") or "") not in {"first_confirmed", "authorized"}:
+            continue
+        event_id = str(event.get("event_id") or "")
+        if not event_id:
+            continue
+        try:
+            await _record_plan_group_confirmation(session, actor, proposal, event_id)
+        except AuthorizationError as exc:
+            healed = await session.get(models.ConfirmationGroup, group.group_id, populate_existing=True)
+            if str(getattr(healed, "status", "") or "") not in {"confirmed", "executing", "completed", "partially_completed"}:
+                raise
+            logging.info(
+                "Plan group authorization replay was superseded for proposal=%s group=%s: %s",
+                proposal.proposal_id, group.group_id, exc,
+            )
+            break
+        healed_any = True
+    if healed_any:
+        await session.commit()
+        logging.info(
+            "Healed torn Plan group authorization for proposal=%s group=%s",
+            proposal.proposal_id, group.group_id,
+        )
+
 
 async def _execute_plan_node_projection(
     session: AsyncSession,
@@ -507,6 +553,7 @@ async def _confirm_plan_group_proposal(
         continuation = await _continuation_after_confirmed(proposal.proposal_id)
         return json_safe({**stored_response, "continuation": continuation}) if continuation is not None else stored_response
     if proposal.status == "authorized":
+        await _heal_torn_plan_group_authorization(session, actor, proposal, group)
         return await _execute_and_finalize_authorized_plan(session, actor, proposal, plan, group)
     if proposal.status not in {"pending", "awaiting_next_confirmation"}:
         raise OperatorError("conflict_error", "Plan Group projection is no longer confirmable.", {"status": proposal.status})
@@ -850,6 +897,7 @@ async def _execute_and_finalize_authorized_plan(
             {"proposal_id": str(proposal_id_value), "requires_manual_review": True},
         )
     authorization_event = dict(authorization_events[-1])
+    await _heal_torn_plan_group_authorization(session, actor, proposal, group)
     execution_job = await _claim_plan_group_execution_job(session, proposal)
     if execution_job is None:
         # A failed claim CAS rolls the session back and expires loaded ORM rows;
