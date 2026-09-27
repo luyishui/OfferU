@@ -1369,10 +1369,18 @@ async def _execute_atomic_group(db: Any, plan: models.ProposalPlan, nodes: list[
                 last_error = exc
                 if exc.classification == "transient" and attempts < max(1, int(max_attempts)):
                     continue
-                break
             except Exception as exc:
                 await db.rollback()
-                last_error = NodeExecutionError("unknown", str(exc))
+                # OperatorError codes (conflict/validation/not_found/permission) are
+                # user-recoverable refusals -> permanent -> group "failed", not
+                # manual_review. Reserve manual_review for unknown/integrity faults.
+                exc_code = str(getattr(exc, "code", "") or "")
+                classification = (
+                    "permanent"
+                    if exc_code in {"conflict_error", "validation_error", "not_found_error", "permission_error"}
+                    else "unknown"
+                )
+                last_error = NodeExecutionError(classification, str(exc))
                 break
     finally:
         # Always stop + join the heartbeat, including on asyncio.CancelledError
@@ -1917,7 +1925,18 @@ async def execute_authorized_plan(
                     await db.rollback()
                     node = await db.get(models.OperationNode, node_id, populate_existing=True)
                     claim = await _fenced_receipt(db, node_id, claim_token, claim_generation)
-                    receipt = await _publish_failure(db, node, claim, NodeExecutionError("unknown", str(exc)), attempts=attempts)
+                    # OperatorError codes are user-recoverable refusals, not defects:
+                    # conflict_error = version drift, validation_error/not_found/
+                    # permission = bad or missing input. All are PERMANENT and land
+                    # the node "failed" — manual_review is reserved for genuinely
+                    # unknown/integrity faults that need a human.
+                    exc_code = str(getattr(exc, "code", "") or "")
+                    classification = (
+                        "permanent"
+                        if exc_code in {"conflict_error", "validation_error", "not_found_error", "permission_error"}
+                        else "unknown"
+                    )
+                    receipt = await _publish_failure(db, node, claim, NodeExecutionError(classification, str(exc)), attempts=attempts)
                     receipts[node_id] = receipt
                     await db.commit()
                     progress = True
