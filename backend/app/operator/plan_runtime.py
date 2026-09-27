@@ -89,6 +89,57 @@ def _proposal_payload(proposal: models.ProposalCache, plan: models.ProposalPlan,
     }
 
 
+_MODEL_LABEL_ZH = {
+    "profile": "档案",
+    "profile_section": "档案条目",
+    "job": "岗位",
+    "pool": "岗位池",
+    "resume": "简历",
+    "application_record": "投递记录",
+    "interview_experience": "面经",
+}
+
+
+def _node_target_label(node: models.OperationNode, locked: Mapping[str, Any]) -> str:
+    """Readable label for what a staged node will write (model + record/field name)."""
+    tool = str(node.tool_name or "")
+    model = str(node.target_name or locked.get("model") or locked.get("model_or_action") or "")
+    label = _MODEL_LABEL_ZH.get(model, model or "记录")
+    record_id = locked.get("record_id")
+    rid = f"（id={record_id}）" if record_id not in (None, "") else ""
+    data = locked.get("data") if isinstance(locked.get("data"), Mapping) else {}
+    updates = locked.get("updates") if isinstance(locked.get("updates"), Mapping) else {}
+    title = str(data.get("title") or data.get("name") or updates.get("title") or updates.get("name") or "").strip()
+    if tool == "invoke_action":
+        action = str(locked.get("action") or "")
+        action_label = {
+            "profile_agent_apply_patch": "应用档案补丁",
+            "generate_resume": "生成定制简历",
+            "organize_jobs_into_pool": "整理岗位入池",
+            "import_jobs_to_application_table": "导入投递表",
+            "interview_extract_questions": "提炼面试题",
+            "batch_mutate": "批量修改",
+        }.get(action, action or "执行动作")
+        return action_label
+    verb = {"create_record": "新建", "patch_record": "更新", "delete_or_archive_record": "删除/归档"}.get(tool, tool or "操作")
+    return f"{verb}{label}{('：' + title) if title else rid}".strip() or "操作"
+
+
+def _group_card_summary(group_nodes: list[models.OperationNode], internal_snapshots: list[models.PlanNodeExecutionSnapshot]) -> str:
+    """Human-readable confirm-card summary naming each write, not an internal count."""
+    by_node = {str(s.node_id): s for s in internal_snapshots}
+    labels = [
+        _node_target_label(node, dict((by_node.get(str(node.node_id)) or {}).locked_payload or {}) if by_node.get(str(node.node_id)) else {})
+        for node in group_nodes
+    ]
+    labels = [x for x in labels if x]
+    if not labels:
+        return f"确认写入 {len(group_nodes)} 项操作"
+    if len(labels) == 1:
+        return f"确认写入：{labels[0]}"
+    return "确认写入：" + "；".join(labels[:3]) + (f" 等 {len(labels)} 项" if len(labels) > 3 else "")
+
+
 async def record_confirmed_projection_execution(db: Any, actor: Any, proposal: models.ProposalCache, result: Mapping[str, Any]) -> models.NodeExecutionReceipt | None:
     """Legacy compatibility hook. Plan-backed cards never execute through this path."""
     if not str(getattr(proposal, "plan_id", "") or ""):
@@ -650,7 +701,7 @@ async def materialize_plan_proposals(
             user_message=user_message,
             affected_records=affected,
             reason="This immutable Plan group requires authorization before any member executes.",
-            summary=f"Confirm Plan group containing {len(group_nodes)} operation(s).",
+            summary=_group_card_summary(group_nodes, internal_snapshots),
             commit=False,
         )
         card_row = await db.get(models.ProposalCache, card["proposal_id"])

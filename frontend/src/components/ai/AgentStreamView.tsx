@@ -75,6 +75,137 @@ export function affectedRecordsText(proposal: Record<string, unknown>): string {
     .join(" / ");
 }
 
+const PLAN_FAILURE_STATUSES = new Set(["failed", "blocked", "rejected", "manual_review", "partially_completed"]);
+
+function planHasAttentionState(plan: PlanExecutionState): boolean {
+  const effective = String(plan.effectiveStatus || plan.status || "").toLowerCase();
+  if (PLAN_FAILURE_STATUSES.has(effective)) return true;
+  for (const group of Object.values(plan.groups || {})) {
+    const g = group as Record<string, unknown>;
+    if (PLAN_FAILURE_STATUSES.has(String(g.status || "").toLowerCase())) return true;
+  }
+  for (const node of Object.values(plan.nodes || {})) {
+    const n = node as Record<string, unknown>;
+    if (PLAN_FAILURE_STATUSES.has(String(n.status || "").toLowerCase())) return true;
+    if (String(n.effect_state || "").toLowerCase() === "manual_review") return true;
+    if (String(n.manual_review_case_id || "").trim()) return true;
+  }
+  return false;
+}
+
+const CONFIRM_GROUP_TOOL_NAMES = new Set(["confirm_plan_group"]);
+const CONFIRM_GROUP_OPERATION_TYPES = new Set(["confirm_group"]);
+
+function isConfirmGroupProposal(proposal: Record<string, unknown>): boolean {
+  const tool = String(proposal.tool_name || "").trim();
+  if (CONFIRM_GROUP_TOOL_NAMES.has(tool)) return true;
+  const operationType = String(proposal.operation_type || "").trim();
+  if (CONFIRM_GROUP_OPERATION_TYPES.has(operationType)) return true;
+  return Array.isArray(proposal.node_ids) && proposal.node_ids.length > 0 && Array.isArray(proposal.operations);
+}
+
+function truncatePreview(text: string, max = 60): string {
+  const trimmed = String(text || "").trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}…`;
+}
+
+function operationTargetLabel(operation: Record<string, unknown>): string {
+  const tool = String(operation.tool_name || "");
+  const action = String(operation.action || "");
+  const model = String(operation.model || "");
+  const recordId = operation.record_id ?? operation.id;
+  const recordIdText = recordId === undefined || recordId === null || recordId === "" ? "" : `#${String(recordId)}`;
+  const modelLabel =
+    model === "profile_section" ? "档案条目"
+    : model === "profile" ? "档案"
+    : model === "job" ? "岗位"
+    : model === "pool" ? "岗位池"
+    : model === "interview_experience" ? "面经"
+    : model === "application_record" ? "投递记录"
+    : model === "resume" ? "简历"
+    : model || "";
+  if (tool === "invoke_action") {
+    const actionLabel =
+      action === "profile_agent_apply_patch" ? "应用档案补丁"
+      : action === "generate_resume" ? "生成定制简历"
+      : action === "organize_jobs_into_pool" ? "整理岗位入池"
+      : action === "import_jobs_to_application_table" ? "导入投递表"
+      : action === "interview_extract_questions" ? "提炼面试题"
+      : action === "batch_mutate" ? "批量修改"
+      : action || "执行动作";
+    return actionLabel;
+  }
+  const opLabel =
+    tool === "create_record" ? "新建"
+    : tool === "patch_record" ? "更新"
+    : tool === "delete_or_archive_record" ? "删除/归档"
+    : tool || "操作";
+  return `${opLabel}${modelLabel}${recordIdText}`.trim() || "操作";
+}
+
+function operationFieldsPreview(operation: Record<string, unknown>): string {
+  const data = operation.data;
+  if (data && typeof data === "object") {
+    const keys = Object.keys(data as Record<string, unknown>).filter((key) => !key.startsWith("_"));
+    const title = String((data as Record<string, unknown>).title || (data as Record<string, unknown>).name || "").trim();
+    if (title) return `标题：${truncatePreview(title, 40)}`;
+    if (keys.length) return `字段：${keys.slice(0, 4).join("、")}${keys.length > 4 ? "…" : ""}`;
+  }
+  const updates = operation.updates;
+  if (updates && typeof updates === "object") {
+    const keys = Object.keys(updates as Record<string, unknown>).filter((key) => !key.startsWith("_"));
+    const title = String((updates as Record<string, unknown>).title || (updates as Record<string, unknown>).name || "").trim();
+    if (title) return `标题：${truncatePreview(title, 40)}`;
+    if (keys.length) return `字段：${keys.slice(0, 4).join("、")}${keys.length > 4 ? "…" : ""}`;
+  }
+  const input = operation.input;
+  if (input && typeof input === "object") {
+    const inputObj = input as Record<string, unknown>;
+    const patch = inputObj.patch;
+    if (patch && typeof patch === "object") {
+      const sections = (patch as Record<string, unknown>).sections;
+      if (Array.isArray(sections) && sections.length) {
+        const titles = sections
+          .map((section) => String((section as Record<string, unknown>)?.title || "").trim())
+          .filter(Boolean)
+          .slice(0, 3);
+        if (titles.length) {
+          return `档案条目：${titles.join("、")}${sections.length > 3 ? ` 等 ${sections.length} 项` : ""}`;
+        }
+        return `档案条目 ${sections.length} 项`;
+      }
+      const baseInfo = (patch as Record<string, unknown>).base_info;
+      if (baseInfo && typeof baseInfo === "object") {
+        const infoKeys = Object.keys(baseInfo as Record<string, unknown>);
+        const name = String((baseInfo as Record<string, unknown>).name || "").trim();
+        if (name) return `姓名：${truncatePreview(name, 30)}`;
+        if (infoKeys.length) return `基本信息：${infoKeys.slice(0, 4).join("、")}`;
+      }
+      const patchKeys = Object.keys(patch as Record<string, unknown>).filter((key) => !key.startsWith("_"));
+      if (patchKeys.length) return `补丁字段：${patchKeys.slice(0, 4).join("、")}`;
+    }
+    const inputKeys = Object.keys(inputObj).filter((key) => !key.startsWith("_"));
+    if (inputKeys.length) return `参数：${inputKeys.slice(0, 4).join("、")}`;
+  }
+  return "";
+}
+
+function confirmGroupOperationLines(proposal: Record<string, unknown>): Array<{ key: string; label: string; detail: string }> {
+  const raw = proposal.operations;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return null;
+      const operation = item as Record<string, unknown>;
+      const label = operationTargetLabel(operation);
+      const detail = operationFieldsPreview(operation);
+      return { key: `${index}-${label}`, label, detail };
+    })
+    .filter((line): line is { key: string; label: string; detail: string } => Boolean(line));
+}
+
+
 function formatErrorMessage(rawError: string | undefined): { summary: string; detail: string } {
   const err = String(rawError || "").trim();
   if (!err) {
@@ -285,6 +416,16 @@ export function ProposalList({
                 {recoveryText(proposal) && <p className="mt-1 font-medium text-black/60">{recoveryText(proposal)}</p>}
                 {affectedRecordsText(proposal) && (
                   <p className="mt-1 break-words font-medium text-black/60">{affectedRecordsText(proposal)}</p>
+                )}
+                {isConfirmGroupProposal(proposal) && (
+                  <ul className="mt-2 space-y-1 border-t border-black/10 pt-2">
+                    {confirmGroupOperationLines(proposal).map((line) => (
+                      <li key={line.key} className="break-words text-black/70">
+                        <span className="font-bold text-black">{line.label}</span>
+                        {line.detail ? <span className="text-black/60">：{line.detail}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
             </div>
@@ -676,42 +817,32 @@ export function ManualReviewCaseList({
 }
 
 export function PlanExecutionList({ plans }: { plans: Record<string, PlanExecutionState> }) {
-  const items = Object.values(plans).sort((a, b) => a.planId.localeCompare(b.planId));
+  // The Plan/Group/Node internals are a debug view — raw plan_/group_/node_ ids,
+  // digests and effect_state mean nothing to the user and duplicate the real
+  // confirm card (ProposalList) / manual-review card (ManualReviewCaseList).
+  // Only surface a compact notice when some node actually failed or needs manual
+  // review; a clean awaiting_confirmation/pending/running plan renders nothing.
+  const items = Object.values(plans).filter(planHasAttentionState);
   if (!items.length) return null;
-  const failureStatuses = new Set(["failed", "blocked", "rejected", "manual_review", "partially_completed"]);
+  const failureStatuses = PLAN_FAILURE_STATUSES;
   return (
     <section className="space-y-2" aria-label="Plan execution results">
       {items.map((plan) => {
-        const groups = Object.values(plan.groups);
-        const nodes = Object.values(plan.nodes);
-        const failed = nodes.filter((node) => failureStatuses.has(String(node.status || "")));
+        const nodes = Object.values(plan.nodes) as Record<string, unknown>[];
+        const failed = nodes.filter((node) => failureStatuses.has(String(node.status || "")) || Boolean(String(node.manual_review_case_id || "").trim()));
+        const statusText = String(plan.effectiveStatus || plan.status || "attention");
         return (
-          <article key={plan.planId} className="border-2 border-black bg-[#F6F4EE] p-3 text-xs text-black shadow-[2px_2px_0_0_rgba(18,18,18,0.18)]">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="font-black">Plan {plan.planId}</p>
-              <Chip size="sm" className="rounded-none border border-black bg-white font-bold">{plan.effectiveStatus || plan.status}</Chip>
-            </div>
-            {plan.completionReason && <p className="mt-1 font-semibold text-black/70">completion_reason: {plan.completionReason}</p>}
-            <div className="mt-2 grid gap-2 md:grid-cols-2">
-              {groups.map((group) => (
-                <div key={group.group_id} className="border border-black/30 bg-white p-2">
-                  <p className="font-bold">Group {group.group_id} · {group.status}</p>
-                  {group.result_receipt_id && <p className="break-all">result_receipt_id: {group.result_receipt_id}</p>}
-                  {group.result_digest && <p className="break-all">result_digest: {group.result_digest}</p>}
-                </div>
+          <article key={plan.planId} className="border-2 border-[#D02020] bg-white p-3 text-xs text-black">
+            <p className="font-black text-[#D02020]">部分操作需要处理（{statusText}）</p>
+            <ul className="mt-1 space-y-0.5">
+              {failed.map((node) => (
+                <li key={String(node.node_id)} className="break-words text-black/70">
+                  {String(node.tool_name || node.toolName || node.node_id)} · {String(node.status || "")}
+                  {String(node.manual_review_case_id || "") ? " · 需人工复核" : ""}
+                  {String(node.completion_reason || "") ? ` · ${String(node.completion_reason)}` : ""}
+                </li>
               ))}
-            </div>
-            <div className="mt-2 space-y-1">
-              {nodes.map((node) => (
-                <div key={node.node_id} className={`border px-2 py-1 ${failureStatuses.has(String(node.status || "")) ? "border-[#D02020] bg-white" : "border-black/20 bg-white"}`}>
-                  <p className="font-bold">Node {node.node_id} · {node.status}</p>
-                  <p>effect_state: {node.effect_state || "unknown"} · completion_reason: {node.completion_reason || ""}</p>
-                  {node.manual_review_case_id && <p className="break-all text-[#D02020]">manual_review_case_id: {node.manual_review_case_id}</p>}
-                  {node.effect_manifest_digest && <p className="break-all text-black/60">effect_manifest_digest: {node.effect_manifest_digest}</p>}
-                </div>
-              ))}
-            </div>
-            {failed.length > 0 && <p className="mt-2 font-black text-[#D02020]">部分或全部节点未成功完成，请查看失败节点或人工复核。</p>}
+            </ul>
           </article>
         );
       })}
