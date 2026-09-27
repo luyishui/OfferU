@@ -429,10 +429,18 @@ async def _execute_plan_node_projection(
             f"Authorized Plan execution snapshot failed integrity validation: {exc}",
             {"plan_id": node.plan_id, "group_id": node.confirmation_group_id, "node_id": node.node_id},
         ) from exc
+    locked_src = dict(snapshot.locked_payload or {})
     projection = SimpleNamespace(
         proposal_id=f"plan-node:{node.node_id}", plan_id=node.plan_id, confirmation_group_id=node.confirmation_group_id,
         node_ids=[node.node_id], tool_name=snapshot.tool_name, model_or_action=snapshot.model_or_action,
         record_id=snapshot.record_id, risk_level=snapshot.risk_level, before=snapshot.before, after=snapshot.after,
+        # operation_type lives in locked_payload, not on the snapshot row —
+        # _prepare_delete_or_archive/_validate_locked_delete_archive_metadata read
+        # proposal.operation_type, so a bare SimpleNamespace without it raises
+        # AttributeError -> manual_review (the job-delete wedge).
+        operation_type=str(
+            locked_src.get("operation_type") or locked_src.get("operation") or ""
+        ),
         confirmations_required=int(RISK_CONFIRMATIONS.get(int(snapshot.risk_level or 0), 0)),
         requires_second_confirmation=int(snapshot.risk_level or 0) >= 5,
         expected_version_or_hash=snapshot.expected_version_or_hash, locked_payload=dict(snapshot.locked_payload or {}),
