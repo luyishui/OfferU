@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from app.models import models
 from app.operator import tools
@@ -175,6 +175,15 @@ async def plan_state_envelope(db: Any, plan_id: str, *, resolved_proposal_ids: l
 
 async def pending_plan_bootstrap(db: Any, actor: Any) -> dict[str, Any]:
     """Rehydrate pending Plan/Group cards from durable authority after a UI reload."""
+    # Only rehydrate proposals that are still live: in the session's
+    # pending_proposal_ids authority AND not TTL-expired. Without these filters a
+    # reload resurfaces expired/pruned proposals as dead confirm cards (confirm
+    # -> CAS-expire -> conflict_error -> card stays visible).
+    now = _now()
+    agent_session = await db.get(models.AgentSession, str(actor.session_id))
+    pending_ids = {
+        str(item) for item in list(getattr(agent_session, "pending_proposal_ids", None) or [])
+    }
     rows = list((await db.execute(
         select(models.ProposalCache)
         .where(
@@ -182,9 +191,17 @@ async def pending_plan_bootstrap(db: Any, actor: Any) -> dict[str, Any]:
             models.ProposalCache.session_id == str(actor.session_id),
             models.ProposalCache.tool_name == "confirm_plan_group",
             models.ProposalCache.status.in_(("pending", "awaiting_next_confirmation")),
+            or_(
+                models.ProposalCache.expires_at.is_(None),
+                models.ProposalCache.expires_at > now,
+            ),
         )
         .order_by(models.ProposalCache.created_at, models.ProposalCache.proposal_id)
     )).scalars().all())
+    # Intersect with the session's pending authority: a proposal dropped from
+    # pending_proposal_ids (pruned/resolved) must not rehydrate even if its row
+    # still reads pending.
+    rows = [row for row in rows if str(row.proposal_id) in pending_ids]
     proposals: list[dict[str, Any]] = []
     scoped_plans = list((await db.execute(
         select(models.ProposalPlan)

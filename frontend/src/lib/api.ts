@@ -28,15 +28,18 @@ function buildQuery(params?: Record<string, unknown>) {
   return sp.toString();
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestInit & { timeoutMs?: number }): Promise<T> {
   let res: Response;
   // A hung request (e.g. a POST the backend never answers) must still reject so
   // callers' `finally` blocks can clear `loading`; otherwise the UI wedges.
-  const timeoutSignal = AbortSignal.timeout(30000);
+  // confirm/reject run the whole authorized-group execution + an LLM
+  // continuation synchronously server-side — they legitimately exceed 30s, so
+  // callers pass a longer timeoutMs there.
+  const timeoutSignal = AbortSignal.timeout(options?.timeoutMs ?? 30000);
   const callerSignal = options?.signal ?? null;
   let signal: AbortSignal = timeoutSignal;
   if (callerSignal) {
-    // Combine caller abort with the 30s timeout without AbortSignal.any (not in
+    // Combine caller abort with the timeout without AbortSignal.any (not in
     // all targets): propagate whichever fires first onto a fresh controller.
     const combined = new AbortController();
     const abortFrom = (source: AbortSignal) => () => combined.abort(source.reason);
@@ -673,6 +676,16 @@ async function streamAgentEndpoint(
     }
     const tail = buffer.trim();
     if (tail) emitBlock(tail);
+    // Stream ended (done) without a `final`/`error` event — the connection
+    // dropped mid-turn (proxy close, network blip). Without a terminal event
+    // the reducer stays in status:"streaming" forever with a stuck partial
+    // bubble. Dispatch a synthetic error so the UI lands on a terminal state.
+    if (!finalSeen) {
+      dispatchAgentEvent(
+        { type: "error", error: { message: "连接在回复完成前中断，请重试或刷新查看结果。" } } as AgentStreamEvent,
+        handlers
+      );
+    }
   } catch (error) {
     if (signal?.aborted) return;
     const err = error instanceof Error ? error : new Error(String(error));
@@ -743,11 +756,15 @@ export const harnessAgentApi = {
     request<ProposalDecisionResponse>(`/api/harness-agent/proposals/${encodeURIComponent(proposalId)}/confirm`, {
       method: "POST",
       body: JSON.stringify({ ...(body || {}), operator_session_id: sessionId }),
+      // Backend runs the authorized group's execution + an LLM continuation
+      // synchronously in this POST — can exceed the default 30s timeout.
+      timeoutMs: 120000,
     }),
   rejectProposal: (proposalId: string, sessionId: string, body?: Record<string, unknown>) =>
     request<ProposalDecisionResponse>(`/api/harness-agent/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: "POST",
       body: JSON.stringify({ ...(body || {}), operator_session_id: sessionId }),
+      timeoutMs: 120000,
     }),
   listManualReviewCases: async (sessionId: string): Promise<ManualReviewCase[]> => {
     const payload = await request<ManualReviewCase[] | { cases?: ManualReviewCase[] }>(

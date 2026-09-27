@@ -1311,70 +1311,80 @@ async def _execute_atomic_group(db: Any, plan: models.ProposalPlan, nodes: list[
     )
     attempts = 0
     last_error = NodeExecutionError("unknown", "AtomicGroup did not execute")
-    while attempts < max(1, int(max_attempts)):
-        attempts += 1
-        staged: dict[str, Mapping[str, Any]] = {}
-        local_receipts: dict[str, Any] = dict(receipts)
+    try:
+        while attempts < max(1, int(max_attempts)):
+            attempts += 1
+            staged: dict[str, Mapping[str, Any]] = {}
+            local_receipts: dict[str, Any] = dict(receipts)
+            try:
+                active_nodes: dict[str, models.OperationNode] = {}
+                active_claims: dict[str, models.NodeExecutionReceipt] = {}
+                for node_id in member_ids:
+                    active_node = await db.get(models.OperationNode, node_id, populate_existing=True)
+                    if active_node is None:
+                        raise NodeExecutionError("integrity", "AtomicGroup member disappeared before execution")
+                    active_nodes[node_id] = active_node
+                    active_claims[node_id] = await _fenced_receipt(
+                        db, node_id, group_claim_token, member_generations[node_id]
+                    )
+                for node_id in member_ids:
+                    if lost_heartbeat.is_set():
+                        raise NodeExecutionError(
+                            "unknown",
+                            "AtomicGroup execution lease was lost before the next member effect",
+                        )
+                    node = active_nodes[node_id]
+                    setattr(node, "execution_idempotency_key", member_idempotency_keys[node_id])
+                    raw = dict(await handler(node, payloads[node_id]))
+                    if lost_heartbeat.is_set():
+                        raise NodeExecutionError(
+                            "unknown",
+                            "AtomicGroup execution lease was lost during a member effect",
+                        )
+                    if str(raw.get("status") or "") not in {"completed", "success"}:
+                        raise NodeExecutionError("unknown", "node handler returned a non-terminal success envelope")
+                    raw = canonicalize_node_execution_result(node, raw, resolved_payload=payloads[node_id])
+                    staged[node_id] = raw
+                    local_receipts[node_id] = type("ReceiptView", (), {"status": "completed", "typed_outputs": dict(raw.get("typed_outputs") or {})})()
+                if lost_heartbeat.is_set():
+                    raise NodeExecutionError("unknown", "AtomicGroup execution lease was lost before receipt publication")
+                stop_heartbeat.set()
+                await heartbeat_task
+                group_claim = await _fenced_atomic_group_claim(
+                    db, group_claim_id, group_claim_token, group_claim_generation,
+                )
+                for node_id in member_ids:
+                    node = active_nodes[node_id]
+                    receipt = await _publish_success(
+                        db, node, active_claims[node_id], payloads[node_id], staged[node_id], attempts=attempts
+                    )
+                    receipts[node_id] = receipt
+                group_claim.status = "completed"
+                group_claim.completed_at = _now()
+                group_claim.lease_expires_at = None
+                await db.commit()
+                return True
+            except NodeExecutionError as exc:
+                await db.rollback()
+                last_error = exc
+                if exc.classification == "transient" and attempts < max(1, int(max_attempts)):
+                    continue
+                break
+            except Exception as exc:
+                await db.rollback()
+                last_error = NodeExecutionError("unknown", str(exc))
+                break
+    finally:
+        # Always stop + join the heartbeat, including on asyncio.CancelledError
+        # (a BaseException that escapes the `except Exception` above). Otherwise a
+        # cancelled atomic-group executor leaves a detached heartbeat task that
+        # keeps CAS-renewing the claim lease forever, fencing the group so no
+        # recovery/retry can ever re-acquire it -> permanently wedged.
+        stop_heartbeat.set()
         try:
-            active_nodes: dict[str, models.OperationNode] = {}
-            active_claims: dict[str, models.NodeExecutionReceipt] = {}
-            for node_id in member_ids:
-                active_node = await db.get(models.OperationNode, node_id, populate_existing=True)
-                if active_node is None:
-                    raise NodeExecutionError("integrity", "AtomicGroup member disappeared before execution")
-                active_nodes[node_id] = active_node
-                active_claims[node_id] = await _fenced_receipt(
-                    db, node_id, group_claim_token, member_generations[node_id]
-                )
-            for node_id in member_ids:
-                if lost_heartbeat.is_set():
-                    raise NodeExecutionError(
-                        "unknown",
-                        "AtomicGroup execution lease was lost before the next member effect",
-                    )
-                node = active_nodes[node_id]
-                setattr(node, "execution_idempotency_key", member_idempotency_keys[node_id])
-                raw = dict(await handler(node, payloads[node_id]))
-                if lost_heartbeat.is_set():
-                    raise NodeExecutionError(
-                        "unknown",
-                        "AtomicGroup execution lease was lost during a member effect",
-                    )
-                if str(raw.get("status") or "") not in {"completed", "success"}:
-                    raise NodeExecutionError("unknown", "node handler returned a non-terminal success envelope")
-                raw = canonicalize_node_execution_result(node, raw, resolved_payload=payloads[node_id])
-                staged[node_id] = raw
-                local_receipts[node_id] = type("ReceiptView", (), {"status": "completed", "typed_outputs": dict(raw.get("typed_outputs") or {})})()
-            if lost_heartbeat.is_set():
-                raise NodeExecutionError("unknown", "AtomicGroup execution lease was lost before receipt publication")
-            stop_heartbeat.set()
             await heartbeat_task
-            group_claim = await _fenced_atomic_group_claim(
-                db, group_claim_id, group_claim_token, group_claim_generation,
-            )
-            for node_id in member_ids:
-                node = active_nodes[node_id]
-                receipt = await _publish_success(
-                    db, node, active_claims[node_id], payloads[node_id], staged[node_id], attempts=attempts
-                )
-                receipts[node_id] = receipt
-            group_claim.status = "completed"
-            group_claim.completed_at = _now()
-            group_claim.lease_expires_at = None
-            await db.commit()
-            return True
-        except NodeExecutionError as exc:
-            await db.rollback()
-            last_error = exc
-            if exc.classification == "transient" and attempts < max(1, int(max_attempts)):
-                continue
-            break
-        except Exception as exc:
-            await db.rollback()
-            last_error = NodeExecutionError("unknown", str(exc))
-            break
-    stop_heartbeat.set()
-    await heartbeat_task
+        except BaseException:
+            pass
     group_claim = await _fenced_atomic_group_claim(
         db, group_claim_id, group_claim_token, group_claim_generation,
     )
