@@ -52,6 +52,10 @@ from app.services.profile_schema import (
     normalize_base_info_payload,
     normalize_section_type_alias,
 )
+from app.services.profile_archive_sync import (
+    remove_profile_section_from_personal_archive,
+    sync_profile_section_to_personal_archive,
+)
 
 
 try:
@@ -1681,10 +1685,14 @@ async def create_profile_section(data: ProfileSectionCreateRequest, db: AsyncSes
         confidence=data.confidence,
     )
     db.add(section)
+    await db.flush()  # assign section.id so the archive entry's stable key exists
+    # Keep the /profile archive projection in sync — it's the source the page
+    # renders once personal_archive exists; without this the new section is
+    # invisible to the user even though the agent reads profile_sections.
+    sync_profile_section_to_personal_archive(profile, section)
     await db.commit()
     await db.refresh(section)
     return _serialize_section(section)
-
 
 @router.put("/sections/{section_id}")
 async def update_profile_section(
@@ -1740,6 +1748,7 @@ async def update_profile_section(
     if "confidence" in payload and payload["confidence"] is not None:
         section.confidence = float(payload["confidence"])
 
+    sync_profile_section_to_personal_archive(profile, section)
     await db.commit()
     await db.refresh(section)
     return _serialize_section(section)
@@ -1759,10 +1768,11 @@ async def delete_profile_section(section_id: int, db: AsyncSession = Depends(get
     ).scalar_one_or_none()
     if not section:
         raise HTTPException(status_code=404, detail="Profile section not found")
-
+    remove_profile_section_from_personal_archive(profile, section)
     await db.delete(section)
     await db.commit()
     return {"deleted": True}
+
 
 
 @router.post("/chat")
@@ -1944,6 +1954,8 @@ async def confirm_profile_bullet(data: ProfileChatConfirmRequest, db: AsyncSessi
         confidence=candidate["confidence"],
     )
     db.add(section)
+    await db.flush()  # section.id for the archive entry key
+    sync_profile_section_to_personal_archive(profile, section)
     await db.commit()
     await db.refresh(section)
 
