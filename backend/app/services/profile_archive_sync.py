@@ -27,16 +27,34 @@ def sync_profile_section_to_personal_archive(profile: Any, section: Any) -> bool
     resume_archive = archive.setdefault("resumeArchive", _default_resume_archive(base_info))
     _ensure_resume_lists(resume_archive)
 
-    entry_spec = _archive_entry_from_section(section)
-    if entry_spec is None:
-        return False
-    bucket, entry, identity_keys = entry_spec
-    target = resume_archive.setdefault(bucket, [])
-    if not isinstance(target, list):
-        target = []
-        resume_archive[bucket] = target
+    # Bridge the flat Profile columns into archive basicInfo — the /profile page
+    # reads basicInfo from the archive, but users often fill name/phone/email via
+    # the flat columns (profile.name etc.) or old flows that never wrote
+    # base_info_json. Only fill EMPTY basicInfo fields so user-edited archive
+    # values win; flat column is the fallback source of truth.
+    basic = resume_archive.get("basicInfo") if isinstance(resume_archive.get("basicInfo"), dict) else {}
+    resume_archive["basicInfo"] = basic
+    _flat_to_basic = (
+        ("name", getattr(profile, "name", "")),
+        ("phone", getattr(profile, "phone", "")),
+        ("email", getattr(profile, "email", "")),
+        ("jobIntention", getattr(profile, "headline", "")),
+    )
+    basic_changed = False
+    for key, value in _flat_to_basic:
+        if not _text(basic.get(key)) and _text(value):
+            basic[key] = _text(value)
+            basic_changed = True
 
-    changed = _upsert_entry(target, entry, identity_keys)
+    entry_spec = _archive_entry_from_section(section)
+    changed = basic_changed
+    if entry_spec is not None:
+        bucket, entry, identity_keys = entry_spec
+        target = resume_archive.setdefault(bucket, [])
+        if not isinstance(target, list):
+            target = []
+            resume_archive[bucket] = target
+        changed = _upsert_entry(target, entry, identity_keys) or changed
     if not changed:
         return False
 
