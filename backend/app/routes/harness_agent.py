@@ -25,11 +25,10 @@ from app.operator.manual_review import (
     list_manual_review_cases,
     resolve_manual_review_case,
 )
-from app.operator.plan_runtime import pending_plan_bootstrap
+from app.operator.plan_runtime import PlanMaterializationError, pending_plan_bootstrap
 from app.operator.public_redaction import redact_public_payload
 from app.operator.proposals import confirm_proposal, reject_proposal
 from app.operator.session_authority import (
-    AUTHORITY_STATE_KEY,
     BROWSER_PRINCIPAL_COOKIE_PATH,
     SessionAuthorityError,
     bind_session_authority,
@@ -318,64 +317,67 @@ async def resolve_manual_review_case_route(
 @router.get("/conversations")
 async def conversations(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    response: Response,
 ) -> dict[str, Any]:
-    """List conversations owned by the authenticated browser principal.
+    """List conversations for the browser.
 
-    File-store conversations carry no principal attribution, so ownership is
-    derived from the durable AgentSession authority state: only conversations
-    whose AgentSession row is bound to this browser principal are listed.
-    Unbound/legacy conversations fail closed (not exposed).
+    History listing is a read-only entry point, so a stale/missing browser
+    principal self-heals (a fresh cookie is issued) instead of 401-ing — same
+    contract as ``/chat``/``/chat/stream``. The file store
+    (``harness_agent_conversations.json``) is the source of truth for this
+    single-user local tool, so no ``auth_subject`` ownership filter is applied
+    here; ownership is still enforced on detail/bootstrap/mutation endpoints.
     """
-    auth_subject = _authenticated_subject(request)
-    rows = list((await db.execute(select(models.AgentSession))).scalars().all())
-    owned = {
-        str(row.session_id)
-        for row in rows
-        if _session_authority_subject(row) == auth_subject
-    }
-    conversations = [
-        conversation
-        for conversation in list_conversations()
-        if str(conversation.get("id") or "") in owned
-    ]
-    return {"conversations": conversations}
+    _, issued_token = _resolve_or_issue_subject(request.cookies.get(_BROWSER_PRINCIPAL_COOKIE))
+    if issued_token:
+        _set_browser_principal_cookie(response, issued_token)
+    return {"conversations": list_conversations()}
 
 
 @router.get("/sessions/{session_id}/bootstrap")
 async def session_bootstrap(
     session_id: str,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    actor, _ = await _actor_for_request_session(
-        db, request, _conversation_id(session_id), allow_create=False
+    actor, issued_token = await _actor_for_request_session(
+        db, request, _conversation_id(session_id), allow_create=True
     )
-    return await pending_plan_bootstrap(db, actor)
+    if issued_token:
+        _set_browser_principal_cookie(response, issued_token)
+    try:
+        return await pending_plan_bootstrap(db, actor)
+    except PlanMaterializationError as exc:
+        return {
+            "proposals": [],
+            "plan_events": [],
+            "recovery_error": str(exc),
+        }
 
 
-def _session_authority_subject(row: Any) -> str:
-    """Read the auth_subject recorded by bind_session_authority on an AgentSession row."""
-    state = dict(getattr(row, "state_json", None) or {})
-    authority = state.get(AUTHORITY_STATE_KEY)
-    if not isinstance(authority, dict):
-        return ""
-    return str(authority.get("auth_subject") or "")
-
-
-async def _bind_conversation_owner(db: AsyncSession, conversation_id: str, auth_subject: str) -> ActorContext:
+async def _bind_conversation_owner(
+    db: AsyncSession,
+    conversation_id: str,
+    auth_subject: str,
+    *,
+    allow_create: bool = False,
+) -> ActorContext:
     """Bind the browser principal to the conversation's actor/session ownership.
 
-    Unbound conversations (no AgentSession authority) and conversations owned
-    by a different browser principal are rejected with 403; a missing principal
-    is already rejected with 401 by the caller.
+    With ``allow_create=False`` (the default), unbound conversations (no
+    AgentSession authority) and conversations owned by a different browser
+    principal are rejected with 403; a missing principal is already rejected
+    with 401 by the caller. With ``allow_create=True``, an unbound session is
+    claimed by the current principal — ``bind_session_authority`` still refuses
+    sessions carrying privileged facts via ``_has_privileged_facts_async``.
     """
     try:
         return await bind_session_authority(
             db,
             session_id=_conversation_id(conversation_id),
             auth_subject=auth_subject,
-            allow_create=False,
+            allow_create=allow_create,
         )
     except SessionAuthorityError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -385,10 +387,14 @@ async def _bind_conversation_owner(db: AsyncSession, conversation_id: str, auth_
 async def conversation_detail(
     conversation_id: str,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    auth_subject = _authenticated_subject(request)
-    await _bind_conversation_owner(db, conversation_id, auth_subject)
+    subject, issued_token = _resolve_or_issue_subject(request.cookies.get(_BROWSER_PRINCIPAL_COOKIE))
+    if issued_token:
+        _set_browser_principal_cookie(response, issued_token)
+    await _bind_conversation_owner(db, conversation_id, subject, allow_create=True)
+    await db.commit()
     conversation = get_conversation(_conversation_id(conversation_id))
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
