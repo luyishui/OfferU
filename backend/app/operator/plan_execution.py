@@ -1638,7 +1638,9 @@ async def execution_result_from_receipts(
         )
         if existing_group_receipt is None:
             group_receipt = models.PlanGroupResultReceipt(
-                result_receipt_id=f"group-result:{plan.plan_id}:{group.group_id}",
+                # result_receipt_id is VARCHAR(80): "plan_"/"group_" prefixes are
+                # dropped so the composite id fits (13 + 32 + 1 + 32 = 78 chars).
+                result_receipt_id=f"group-result:{str(plan.plan_id)[5:]}:{str(group.group_id)[6:]}",
                 plan_id=str(plan.plan_id), group_id=str(group.group_id), actor_id=str(plan.actor_id), session_id=str(plan.session_id),
                 projection_schema_version=1, plan_digest=str(plan.plan_digest), group_digest=group_authorization_digest(group),
                 node_outcome_set_digest=node_outcome_set_digest, canonical_result_json=dict(result),
