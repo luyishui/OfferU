@@ -887,7 +887,7 @@ async def _execute_and_finalize_authorized_plan(
     group: models.ConfirmationGroup,
 ) -> dict[str, Any]:
     """Resume a durably authorized Plan Group and publish final confirmed evidence."""
-    from app.operator.plan_execution import _run_lease_heartbeat, execute_authorized_plan, execution_result_from_receipts
+    from app.operator.plan_execution import NodeExecutionError, _run_lease_heartbeat, execute_authorized_plan, execution_result_from_receipts
     from app.operator.plan_runtime import materialize_plan_proposals, plan_state_envelope
 
     proposal_id_value = str(proposal.proposal_id)
@@ -904,6 +904,23 @@ async def _execute_and_finalize_authorized_plan(
         )
     authorization_event = dict(authorization_events[-1])
     await _heal_torn_plan_group_authorization(session, actor, proposal, group)
+    # If a previous confirm already executed the group to a terminal state but
+    # died before finalizing, the durable receipts prove the work is done — the
+    # leftover 'running' execution job is stale bookkeeping, not in-flight work.
+    # Probe once before the claim; a failed projection simply means execution
+    # still has real work to do.
+    try:
+        prior_result = await execution_result_from_receipts(
+            session, plan_id_value, group_id=group_id_value
+        )
+    except NodeExecutionError:
+        prior_result = None
+    group_already_terminal = (
+        prior_result is not None
+        and bool(prior_result.get("all_nodes_terminal"))
+        and str(prior_result.get("group_status") or "")
+        in {"completed", "failed", "manual_review", "partially_completed", "compensated"}
+    )
     execution_job = await _claim_plan_group_execution_job(session, proposal)
     if execution_job is None:
         # A failed claim CAS rolls the session back and expires loaded ORM rows;
@@ -930,10 +947,41 @@ async def _execute_and_finalize_authorized_plan(
                 "manual_review_case_id": str(getattr(review_case, "case_id", "") or ""),
                 "error_json": dict(current_job.error_json or {}),
             })
-        return json_safe({
-            "ok": True, "status": "execution_in_progress", "proposal_id": proposal_id_value,
-            "plan_id": plan_id_value, "plan_status": plan_status_value, "plan_event": envelope,
-        })
+        if group_already_terminal:
+            # The wedge case: receipts prove the group's durable work is done, but the
+            # job row still shows 'running' under a dead claimant's live lease. Adopt
+            # the job for finalization by CAS-ing its claim generation — a live
+            # claimant loses this CAS to the generation bump, so at most one driver
+            # reaches the finalize block. Never re-execute: the terminal receipts are
+            # the proof of work.
+            if current_job is not None and str(current_job.status or "") == "running":
+                changed = await session.execute(
+                    update(models.PlanGroupExecutionJob)
+                    .where(
+                        models.PlanGroupExecutionJob.proposal_id == proposal_id_value,
+                        models.PlanGroupExecutionJob.status == "running",
+                        models.PlanGroupExecutionJob.claim_generation == int(current_job.claim_generation or 0),
+                    )
+                    .values(
+                        claim_token=f"plan-finalize-{uuid.uuid4().hex}",
+                        claim_generation=int(current_job.claim_generation or 0) + 1,
+                        lease_expires_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                        + timedelta(seconds=_PLAN_GROUP_EXECUTION_LEASE_SECONDS),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if int(changed.rowcount or 0) == 1:
+                    await session.commit()
+                    execution_job = await session.get(
+                        models.PlanGroupExecutionJob, proposal_id_value, populate_existing=True
+                    )
+                else:
+                    await session.rollback()
+        if execution_job is None:
+            return json_safe({
+                "ok": True, "status": "execution_in_progress", "proposal_id": proposal_id_value,
+                "plan_id": plan_id_value, "plan_status": plan_status_value, "plan_event": envelope,
+            })
     if execution_job.status == "completed":
         # A completed job must have been finalized atomically with the ProposalCache.
         # Reaching it from an authorized proposal is corruption, never permission to fabricate confirmation evidence.
@@ -985,10 +1033,16 @@ async def _execute_and_finalize_authorized_plan(
 
     setattr(production_handler, "production_plan_handler", True)
     try:
-        await execute_authorized_plan(session, actor, plan_id_value, production_handler)
-        execution_result = await execution_result_from_receipts(
-            session, plan_id_value, group_id=group_id_value
-        )
+        if group_already_terminal:
+            # The group's durable receipts already prove a terminal result — this
+            # confirm only owes finalization (confirmed event + job completion +
+            # continuation), not another execution pass.
+            execution_result = dict(prior_result)
+        else:
+            await execute_authorized_plan(session, actor, plan_id_value, production_handler)
+            execution_result = await execution_result_from_receipts(
+                session, plan_id_value, group_id=group_id_value
+            )
     except BaseException as exc:
         # asyncio.CancelledError is a BaseException, NOT an Exception: without
         # this wider catch a cancelled confirm skips the heartbeat stop and the
