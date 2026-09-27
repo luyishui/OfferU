@@ -2371,7 +2371,7 @@ async def _dispatch_apply_resume_template(
     spec: Any,
     cleaned: Mapping[str, Any],
 ) -> Any:
-    return await _prepare_apply_resume_template_action(session, actor, cleaned)
+    return await _prepare_apply_resume_template_action(session, actor, proposal, payload, spec, cleaned)
 
 
 async def _smartfill_profile_payload(
@@ -2713,6 +2713,9 @@ def _deterministic_smartfill_mappings(fields: list[Any], catalog: list[dict[str,
 async def _prepare_apply_resume_template_action(
     session: AsyncSession,
     actor: ActorContext,
+    proposal: Any,
+    payload: Mapping[str, Any],
+    spec: Any,
     input_payload: Mapping[str, Any],
 ) -> Any:
     resume_id = input_payload.get("resume_id")
@@ -2723,6 +2726,7 @@ async def _prepare_apply_resume_template_action(
     template = await fetch_scoped_record(session, actor, template_spec, models.ResumeTemplate, template_id)
 
     async def execute() -> dict[str, Any]:
+        await _validate_action_expected_versions(session, actor, proposal, payload, spec, input_payload)
         merged_style = {
             **(resume.style_config if isinstance(resume.style_config, Mapping) else {}),
             **(template.css_variables if isinstance(template.css_variables, Mapping) else {}),
