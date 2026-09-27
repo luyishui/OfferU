@@ -412,12 +412,8 @@ export function ProposalList({
               <div className="min-w-0 flex-1">
                 <p className="break-words font-black">{proposalSummary(proposal)}</p>
                 <p className="mt-1 font-semibold text-black/55">{riskLabel(proposal)}</p>
-                {planGroupText(proposal) && <p className="mt-1 break-all font-semibold text-[#2060D0]">{planGroupText(proposal)}</p>}
                 {recoveryText(proposal) && <p className="mt-1 font-medium text-black/60">{recoveryText(proposal)}</p>}
-                {affectedRecordsText(proposal) && (
-                  <p className="mt-1 break-words font-medium text-black/60">{affectedRecordsText(proposal)}</p>
-                )}
-                {isConfirmGroupProposal(proposal) && (
+                {isConfirmGroupProposal(proposal) ? (
                   <ul className="mt-2 space-y-1 border-t border-black/10 pt-2">
                     {confirmGroupOperationLines(proposal).map((line) => (
                       <li key={line.key} className="break-words text-black/70">
@@ -426,6 +422,10 @@ export function ProposalList({
                       </li>
                     ))}
                   </ul>
+                ) : (
+                  affectedRecordsText(proposal) && (
+                    <p className="mt-1 break-words font-medium text-black/60">{affectedRecordsText(proposal)}</p>
+                  )
                 )}
               </div>
             </div>
