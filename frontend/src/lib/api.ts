@@ -30,11 +30,30 @@ function buildQuery(params?: Record<string, unknown>) {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let res: Response;
+  // A hung request (e.g. a POST the backend never answers) must still reject so
+  // callers' `finally` blocks can clear `loading`; otherwise the UI wedges.
+  const timeoutSignal = AbortSignal.timeout(30000);
+  const callerSignal = options?.signal ?? null;
+  let signal: AbortSignal = timeoutSignal;
+  if (callerSignal) {
+    // Combine caller abort with the 30s timeout without AbortSignal.any (not in
+    // all targets): propagate whichever fires first onto a fresh controller.
+    const combined = new AbortController();
+    const abortFrom = (source: AbortSignal) => () => combined.abort(source.reason);
+    if (callerSignal.aborted) combined.abort(callerSignal.reason);
+    else if (timeoutSignal.aborted) combined.abort(timeoutSignal.reason);
+    else {
+      callerSignal.addEventListener("abort", abortFrom(callerSignal), { once: true });
+      timeoutSignal.addEventListener("abort", abortFrom(timeoutSignal), { once: true });
+    }
+    signal = combined.signal;
+  }
   try {
     res = await fetch(`${API_BASE}${path}`, {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       ...options,
+      signal,
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -51,7 +70,20 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw new Error(`API Error: ${res.status}${detail ? ` - ${detail}` : ""}`);
   }
-  return res.json();
+  const data = (await res.json()) as T;
+  // Backend error envelope: HTTP 200 + {ok:false, error:{code,message,details}}.
+  // Throw so callers' catch → setError surfaces it. Soft-states that also set
+  // ok:false but carry `status` (manual_review/running/failed) or a plain-string
+  // `error` (session_busy) are NOT thrown: proposalDecisionUiTransition and
+  // applyConfirmContinuation handle them as in-app state.
+  const envelope = data as { ok?: unknown; error?: unknown } | null;
+  if (envelope && envelope.ok === false && envelope.error && typeof envelope.error === "object") {
+    const apiError = envelope.error as { code?: unknown; message?: unknown };
+    const err = new Error(String(apiError.message || "操作失败，请稍后重试")) as Error & { code?: string };
+    if (apiError.code) err.code = String(apiError.code);
+    throw err;
+  }
+  return data;
 }
 
 // ---- Jobs API ----
