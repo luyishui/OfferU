@@ -2208,7 +2208,20 @@ async def _prepare_invoke_action(
     cleaned = validate_action_schema(spec, provider_input)
     await validate_action_references(session, actor, spec, cleaned)
     await _validate_action_expected_versions(session, actor, proposal, payload, spec, cleaned)
-    _validate_stored_risk(proposal, calculate_action_risk(spec, cleaned))
+    # Stage-time applied downgrade_risk_with_scope for batch_mutate — reapply it
+    # here so confirm-time risk matches what was sealed into the proposal,
+    # otherwise _validate_stored_risk sees a mismatch and conflict_errors.
+    computed_risk = calculate_action_risk(spec, cleaned)
+    if action_name == "batch_mutate":
+        target = (cleaned or {}).get("target") or {}
+        record_ids_set = {str(rid) for rid in (target.get("record_ids") or [])}
+        from app.operator.guards import downgrade_risk_with_scope
+        computed_risk = await downgrade_risk_with_scope(
+            session, actor.session_id, actor.actor_id,
+            str((cleaned or {}).get("model") or ""), record_ids_set,
+            str((cleaned or {}).get("operation") or ""), computed_risk,
+        )
+    _validate_stored_risk(proposal, computed_risk)
 
     if not _action_is_implemented(spec):
         raise OperatorError(

@@ -374,8 +374,11 @@ def record_explicit_effect_if_active(**kwargs: Any) -> None:
 
 def record_noop_effect(*, model: str, record_id: Any, reason: str = "already_satisfied") -> None:
     recorder = _CURRENT_RECORDER.get()
+    # Outside a Plan node recorder (standalone confirm path) there is no manifest
+    # to extend — a no-op is just an audit marker, so tolerate the missing
+    # recorder instead of crashing the whole execute() closure into manual_review.
     if recorder is None:
-        raise EffectManifestError("no-op observation was recorded outside a node transaction recorder")
+        return
     recorder.record_noop(model=model, record_id=record_id, reason=reason)
 
 
