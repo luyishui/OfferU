@@ -165,6 +165,12 @@ export function HarnessAgentDock() {
     setHistoryOpen(false);
     setTreeOpen(false);
     setTree(null);
+    // Clear a wedged request state too: an aborted/errored send can leave
+    // `loading`/`error`/draft `input` behind, and starting fresh must always be
+    // an escape hatch.
+    setLoading(false);
+    setError("");
+    setInput("");
     setAgentState({
       ...createInitialAgentStreamState(),
       messages: [
@@ -232,7 +238,11 @@ export function HarnessAgentDock() {
   };
 
   const confirmProposal = async (proposalId: string) => {
-    if (loading || !conversationId) return;
+    if (loading) return;
+    if (!conversationId) {
+      setError("对话尚未就绪，请稍后重试");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -261,7 +271,11 @@ export function HarnessAgentDock() {
   };
 
   const rejectProposal = async (proposalId: string) => {
-    if (loading || !conversationId) return;
+    if (loading) return;
+    if (!conversationId) {
+      setError("对话尚未就绪，请稍后重试");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -391,7 +405,8 @@ export function HarnessAgentDock() {
               type="button"
               onClick={() => setHistoryOpen((value) => !value)}
               className="flex max-w-[180px] items-center gap-1 text-left text-[11px] font-black uppercase tracking-[0.08em] text-black/65 hover:text-black"
-              title="打开历史对话"
+              title={`查看历史对话（当前：${conversationTitle || "历史对话"}）`}
+              aria-label="查看历史对话"
             >
               <History size={12} />
               <span className="truncate">{conversationTitle || "历史对话"}</span>
@@ -407,6 +422,17 @@ export function HarnessAgentDock() {
           <Chip size="sm" className="border border-black bg-white text-[10px] font-semibold text-black">
             {latestMode}
           </Chip>
+          <Button
+            isIconOnly
+            size="sm"
+            variant="light"
+            aria-label="开始新对话"
+            title="开始新对话"
+            onPress={startNewConversation}
+            className="min-w-8 text-black"
+          >
+            <Plus size={16} />
+          </Button>
           <Button isIconOnly size="sm" variant="light" aria-label="关闭助手" onPress={() => setOpen(false)} className="min-w-8 text-black">
             <X size={16} />
           </Button>
