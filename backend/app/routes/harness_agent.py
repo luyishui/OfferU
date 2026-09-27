@@ -347,13 +347,17 @@ async def session_bootstrap(
     if issued_token:
         _set_browser_principal_cookie(response, issued_token)
     try:
-        return await pending_plan_bootstrap(db, actor)
+        payload = await pending_plan_bootstrap(db, actor)
     except PlanMaterializationError as exc:
-        return {
+        payload = {
             "proposals": [],
             "plan_events": [],
             "recovery_error": str(exc),
         }
+    # Persist any session-authority claim made while resolving this bootstrap so
+    # the ownership binding is durable, matching conversation_detail.
+    await db.commit()
+    return payload
 
 
 async def _bind_conversation_owner(
